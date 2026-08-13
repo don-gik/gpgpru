@@ -1,0 +1,9 @@
+[package]
+name = "gpgpru_core"
+version = "0.1.0"
+edition = "2024"
+description = "Core lib for gpgpru"
+
+[dependencies]
+ash = { workspace = true }
+thiserror = "2.0.20"
