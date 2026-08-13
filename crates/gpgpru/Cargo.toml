@@ -1,0 +1,9 @@
+[package]
+name = "gpgpru"
+version = "0.1.0"
+edition = "2024"
+description = "Rust GPU framework"
+
+[dependencies]
+gpgpru_core = { path = "../gpgpru_core" }
+gpgpru_macro = { path = "../gpgpru_macro" }
