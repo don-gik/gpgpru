@@ -4,7 +4,11 @@ edition.workspace = true
 version.workspace = true
 description = "Macros for gpgpru"
 
+[lib]
+proc-macro = true
+
 [dependencies]
 syn = { workspace = true }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
+hassle-rs = "0.12.0"

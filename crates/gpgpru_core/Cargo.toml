@@ -6,4 +6,8 @@ description = "Core lib for gpgpru"
 
 [dependencies]
 ash = { workspace = true }
+crossbeam-channel = "0.5.16"
+crossbeam-queue = "0.3.13"
+gpu-allocator = { version = "0.28.0", features = ["vulkan"] }
+parking_lot = "0.12.5"
 thiserror = "2.0.20"
