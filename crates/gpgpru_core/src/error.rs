@@ -17,8 +17,20 @@ pub enum GpuError {
     #[error("Device doesn't support compute queue.")]
     NoComputeQueue,
 
-    #[error("Device Out of Memory")]
-    OutOfMemory,
+    #[error("Device Out of Memory: {0:?}")]
+    GpuAllocation(#[from] gpu_allocator::AllocationError),
+
+    #[error("Allocation info is missing.")]
+    NoAllocation,
+
+    #[error("Memory is not mapped to CPU address space.")]
+    NotMapped,
+
+    #[error("Data size ({requested} bytes) exceeds allocated buffer size ({available} bytes).")]
+    BufferOverflow { requested: usize, available: usize },
+
+    #[error("The size of the buffer is invalid")]
+    InvalidBufferSize,
 }
 
 pub type Result<T> = std::result::Result<T, GpuError>;
