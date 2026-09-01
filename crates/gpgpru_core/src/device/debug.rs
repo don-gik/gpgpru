@@ -1,7 +1,11 @@
 // src/device/debug.rs
 
-use crate::error::Result;
-use ash::{Entry, Instance, vk};
+use crate::Result;
+use ash::{Entry, Instance};
+
+#[cfg(debug_assertions)]
+use ash::vk;
+#[cfg(debug_assertions)]
 use std::ffi::CStr;
 
 #[cfg(debug_assertions)]
@@ -38,7 +42,7 @@ impl DebugContext {
     }
 
     #[cfg(not(debug_assertions))]
-    pub(crate) fn new(_entry: &Entry, _instance: &Instance) -> Result<Self, GpuError> {
+    pub(crate) fn new(_entry: &Entry, _instance: &Instance) -> Result<Self> {
         Ok(Self)
     }
 
@@ -51,7 +55,7 @@ impl DebugContext {
     }
 
     #[cfg(not(debug_assertions))]
-    pub(crate) unsafe fn destroy(&mut self) {}
+    pub(crate) unsafe fn destroy(&self) {}
 }
 
 #[cfg(debug_assertions)]
