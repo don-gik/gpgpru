@@ -43,7 +43,7 @@ impl DebugContext {
     }
 
     #[cfg(debug_assertions)]
-    pub(crate) unsafe fn destroy(&mut self) {
+    pub(crate) unsafe fn destroy(&self) {
         unsafe {
             self.loader
                 .destroy_debug_utils_messenger(self.messenger, None);

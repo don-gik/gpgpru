@@ -11,6 +11,6 @@ version = "0.1.0"
 [workspace.dependencies]
 anyhow = "1.0.104"
 ash = "0.38.0"
-syn = { version = "3.0.3", features = ["full", "extra-traits"] }
+syn = { version = "3.0.3", features = ["full", "extra-traits", "visit"] }
 quote = "1.0.47"
 proc-macro2 = "1.0.107"
