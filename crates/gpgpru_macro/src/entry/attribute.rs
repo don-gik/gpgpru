@@ -1,4 +1,4 @@
-// src/attribute.rs
+// src/entry/attribute.rs
 
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, LitInt, Token, parenthesized};

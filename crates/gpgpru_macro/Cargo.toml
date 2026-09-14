@@ -11,6 +11,7 @@ proc-macro = true
 syn = { workspace = true }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
-tempfile = "3.27.0"
 shader-slang = "0.1.0"
 cargo_metadata = "0.23.1"
+hex = "0.4.3"
+rustc-hash = "2.1.3"
