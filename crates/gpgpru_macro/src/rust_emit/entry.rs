@@ -18,6 +18,7 @@ pub fn generate_entry(item_fn: &syn::ItemFn) -> syn::Result<(TokenStream2, Token
 
     let mut wrapper_args = Vec::new();
     let mut struct_fields_info = Vec::new();
+    let mut hazard_trace_calls = Vec::new();
 
     for (name, gpu_type) in &parsed.pushed_fields {
         let arg_ident = format_ident!("{}", name);
@@ -37,6 +38,15 @@ pub fn generate_entry(item_fn: &syn::ItemFn) -> syn::Result<(TokenStream2, Token
                 let ptr_field_ident = format_ident!("{}", ptr_field_name);
                 let len_field_name = format!("_gpu_{}_len", name);
                 let len_field_ident = format_ident!("{}", len_field_name);
+
+                let access_enum = if *is_mut {
+                    quote! { gpgpru::__private::AccessType::Write }
+                } else {
+                    quote! { gpgpru::__private::AccessType::Read }
+                };
+                hazard_trace_calls.push(quote! {
+                    visitor(self.#ptr_field_ident, self.#len_field_ident as u64, #access_enum);
+                });
 
                 struct_fields_info.push(FieldInfo {
                     name: ptr_field_name,
@@ -79,6 +89,12 @@ pub fn generate_entry(item_fn: &syn::ItemFn) -> syn::Result<(TokenStream2, Token
         #[derive(Clone, Copy)]
         struct KernelArgs {
             #(#struct_fields),*
+        }
+
+        impl gpgpru::__private::HazardTrace for KernelArgs {
+            fn trace_hazards(&self, visitor: &mut dyn FnMut(u64, u64, gpgpru::__private::AccessType)) {
+                #(#hazard_trace_calls)*
+            }
         }
 
         let args = KernelArgs {

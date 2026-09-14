@@ -1,6 +1,6 @@
 // src/entry/argument.rs
 
-use crate::{GpuType, entry::argument::SystemBinding::GlobalIdX};
+use crate::GpuType;
 
 use std::collections::HashMap;
 

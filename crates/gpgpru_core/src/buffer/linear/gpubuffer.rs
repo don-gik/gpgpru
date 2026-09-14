@@ -24,6 +24,9 @@ pub struct GpuBuffer<T, Loc: LocationInfo = GpuOnly> {
     _marker: PhantomData<(T, Loc)>,
 }
 
+unsafe impl<T, Loc: LocationInfo> Send for GpuBuffer<T, Loc> {}
+unsafe impl<T, Loc: LocationInfo> Sync for GpuBuffer<T, Loc> {}
+
 impl<T, Loc: LocationInfo> AsGpuBuffer<T> for GpuBuffer<T, Loc> {
     fn base_device_address(&self) -> u64 {
         self.device_address
@@ -50,6 +53,8 @@ impl<T, Loc: LocationInfo> Drop for GpuBuffer<T, Loc> {
             let trash = BufferTrash {
                 buffer: self.buffer,
                 allocation,
+                bda: self.base_device_address(),
+                size: self.size(),
             };
 
             self.shared
@@ -135,6 +140,9 @@ pub struct BufferSlice<'a, T, Loc: LocationInfo = GpuOnly> {
     pub offset: u64,
     pub size: u64,
 }
+
+unsafe impl<'a, T, Loc: LocationInfo> Send for BufferSlice<'a, T, Loc> {}
+unsafe impl<'a, T, Loc: LocationInfo> Sync for BufferSlice<'a, T, Loc> {}
 
 impl<'a, T> AsGpuBuffer<T> for BufferSlice<'a, T> {
     fn vk_buffer(&self) -> Buffer {

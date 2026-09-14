@@ -17,8 +17,6 @@ pub(crate) use lowering::LoweringBuilder;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 
-use quote::ToTokens;
-
 use rustc_hash::FxHasher;
 use std::hash::Hasher;
 
@@ -36,7 +34,7 @@ pub fn compute(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn compute_impl(attr: TokenStream2, item_fn: TokenStream2) -> syn::Result<TokenStream2> {
     // Parse Attributes and Fn
     let compute_attr: ComputeAttr = syn::parse2(attr)?;
-    let input_fn: syn::ItemFn = syn::parse2(item_fn)?;
+    let input_fn: syn::ItemFn = syn::parse2(item_fn.clone())?;
 
     // Fn Ident attributes
     let fn_vis = &input_fn.vis;
@@ -123,6 +121,33 @@ fn compute_impl(attr: TokenStream2, item_fn: TokenStream2) -> syn::Result<TokenS
         quote::quote! { &[] }
     };
 
+    // Comment
+    let orig_docs: Vec<_> = input_fn
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("doc"))
+        .collect();
+
+    let mut param_doc_markdown = String::from("\n\n### Kernel Parameters\n");
+
+    for (name, gpu_type) in &parsed_sig.pushed_fields {
+        match gpu_type {
+            GpuType::Slice { element, is_mut } => {
+                let access_str = if *is_mut { "Read/Write" } else { "Read-Only" };
+                param_doc_markdown.push_str(&format!(
+                    "- **`{}`**: GPU Device Buffer (`{}`)\n  - **Access**: {}\n  - **Type**: `impl AsGpuBuffer<{}>` (BDA & Length auto-bound)\n",
+                    name, element, access_str, element
+                ));
+            }
+            _ => {
+                param_doc_markdown.push_str(&format!(
+                    "- **`{}`**: Uniform Push Constant (`{}`)\n",
+                    name, gpu_type
+                ));
+            }
+        }
+    }
+
     // Generate Entry
     let (wrapper_args_token, struct_token) = rust_emit::generate_entry(&input_fn)?;
 
@@ -134,16 +159,23 @@ fn compute_impl(attr: TokenStream2, item_fn: TokenStream2) -> syn::Result<TokenS
     let kernel_args_token = quote::quote!(KernelArgs);
 
     let generated_tokens = quote::quote! {
-        #fn_vis fn #fn_ident(#wrapper_args_token) -> gpgpru::__private::CommandBuilder<impl Copy> {
+        #(#orig_docs)*
+        #[doc = #param_doc_markdown]
+        #fn_vis fn #fn_ident(#wrapper_args_token) -> gpgpru::__private::CommandBuilder<impl gpgpru::__private::HazardTrace + Copy> {
             #struct_token
 
             const #source_ident: &[u32] = #bytes_token;
 
             gpgpru::__private::CommandBuilder::<#kernel_args_token>::new(#source_ident, #args_ident).entry_point("main")
         }
+
+        const _ : () = {
+            #[allow(dead_code)]
+            #item_fn
+        };
     };
 
-    dbg!(builder);
+    // dbg!(builder);
 
     Ok(generated_tokens)
 }
@@ -152,6 +184,8 @@ fn compute_impl(attr: TokenStream2, item_fn: TokenStream2) -> syn::Result<TokenS
 mod tests {
     use super::*;
     use syn::parse_quote;
+
+    use quote::ToTokens;
 
     #[test]
     fn test_slang_emit_success() {

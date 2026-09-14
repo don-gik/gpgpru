@@ -7,6 +7,8 @@ mod staging;
 mod task;
 
 use super::{GarbageManager, PipelineManager, VulkanCore};
+use crate::device::AllocationManager;
+use crate::page::PageTracker;
 use crate::{GpuError, Result};
 
 use queue::TaskQueue;
@@ -17,20 +19,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ash::vk::{
-    CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel,
-    CommandBufferSubmitInfo, CommandBufferUsageFlags, CommandPool, CommandPoolCreateFlags,
-    CommandPoolCreateInfo, Fence, PipelineBindPoint, PipelineLayout, PipelineStageFlags2, Queue,
-    Semaphore, SemaphoreCreateInfo, SemaphoreSubmitInfo, SemaphoreType, SemaphoreTypeCreateInfo,
-    ShaderStageFlags, SubmitInfo2,
+    AccessFlags2, CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo,
+    CommandBufferLevel, CommandBufferSubmitInfo, CommandBufferUsageFlags, CommandPool,
+    CommandPoolCreateFlags, CommandPoolCreateInfo, Fence, PipelineBindPoint, PipelineLayout,
+    PipelineStageFlags2, Semaphore, SemaphoreCreateInfo, SemaphoreSubmitInfo, SemaphoreType,
+    SemaphoreTypeCreateInfo, ShaderStageFlags, SubmitInfo2,
 };
-use gpu_allocator::vulkan::Allocator;
-use parking_lot::Mutex;
 
-#[allow(dead_code)]
-pub(crate) struct QueueContext {
-    pub queue: Mutex<Queue>,
-    pub family_index: u32,
-}
+// use parking_lot::Mutex;
+
+// pub(crate) struct QueueContext {
+//     pub queue: Mutex<Queue>,
+//     pub family_index: u32,
+// }
 
 const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
@@ -102,15 +103,67 @@ impl CommandManager {
         self.task_queue.push_task(task);
     }
 
+    fn record_task_barriers(
+        &self,
+        cmd_buffer: ash::vk::CommandBuffer,
+        task: &Task,
+        page_tracker: &PageTracker,
+        current_value: u64,
+        completed_value: u64,
+    ) {
+        let mut accum_src = AccessFlags2::empty();
+        let mut accum_dst = AccessFlags2::empty();
+
+        (task.trace_fn)(&task.push_constants, &mut |bda, size, access| {
+            if let Some(hazard) =
+                page_tracker.check_and_update(bda, size, access, current_value, completed_value)
+            {
+                if hazard.need_barrier {
+                    accum_src |= hazard.src_access;
+                    accum_dst |= hazard.dst_access;
+                }
+            }
+        });
+
+        // Barrier
+        if !accum_src.is_empty() || !accum_dst.is_empty() {
+            let memory_barrier = ash::vk::MemoryBarrier2::default()
+                .src_stage_mask(PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(accum_src)
+                .dst_stage_mask(PipelineStageFlags2::COMPUTE_SHADER)
+                .dst_access_mask(accum_dst);
+
+            let dependency_info = ash::vk::DependencyInfo::default()
+                .memory_barriers(std::slice::from_ref(&memory_barrier));
+
+            unsafe {
+                self.core
+                    .logical_device
+                    .cmd_pipeline_barrier2(cmd_buffer, &dependency_info);
+            }
+        }
+    }
+
     pub(crate) fn dispatch(
         &self,
         pipeline_manager: &PipelineManager,
         gc_manager: &GarbageManager,
-        allocator: &mut Allocator,
+        allocator: &AllocationManager,
+        page_tracker: &PageTracker,
     ) -> Result<u64> {
         let current_value = self.next_semaphore_value.load(Ordering::Relaxed) - 1;
+        let completed_value = unsafe {
+            self.core
+                .logical_device
+                .get_semaphore_counter_value(self.timeline_semaphore)?
+        };
 
-        gc_manager.cleanup(&self.core.logical_device, allocator, current_value);
+        gc_manager.cleanup(
+            &self.core.logical_device,
+            allocator,
+            page_tracker,
+            current_value,
+        );
 
         let tasks = self.task_queue.drain_and_sort();
         if tasks.is_empty() {
@@ -150,6 +203,15 @@ impl CommandManager {
         let mut current_layout: PipelineLayout = PipelineLayout::null();
 
         for task in tasks {
+            self.record_task_barriers(
+                cmd_buffer,
+                &task,
+                page_tracker,
+                current_value,
+                completed_value,
+            );
+
+            // Pipeline Binding
             if current_pipeline_id != Some(task.pipeline_id) {
                 let pipeline_info = pipeline_manager
                     .get(task.pipeline_id)

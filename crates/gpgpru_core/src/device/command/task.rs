@@ -1,5 +1,7 @@
 // src/device/command/task.rs
 
+use crate::__private::{AccessType, HazardTrace};
+
 pub struct Task {
     /// PipelineManager uses this hash.
     pub(crate) pipeline_id: u64,
@@ -7,10 +9,11 @@ pub struct Task {
     pub(crate) push_constants: [u8; 128],
     pub push_constants_size: u32,
     pub(crate) dispatch_size: (u32, u32, u32),
+    pub trace_fn: fn(&[u8], &mut dyn FnMut(u64, u64, AccessType)),
 }
 
 impl Task {
-    pub fn new<T: Copy>(push_data: &T, dispatch_size: (u32, u32, u32)) -> Self {
+    pub fn new<T: Copy + HazardTrace>(push_data: &T, dispatch_size: (u32, u32, u32)) -> Self {
         let size = std::mem::size_of::<T>();
         assert!(
             size <= 128,
@@ -31,6 +34,10 @@ impl Task {
             push_constants,
             push_constants_size: size as u32,
             dispatch_size,
+            trace_fn: |bytes, visitor| {
+                let data = unsafe { &*(bytes.as_ptr() as *const T) };
+                data.trace_hazards(visitor);
+            },
         }
     }
 

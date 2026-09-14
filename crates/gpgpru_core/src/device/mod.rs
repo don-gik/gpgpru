@@ -23,6 +23,7 @@ pub(crate) use vulkancore::VulkanCore;
 
 // Use crate modules
 use crate::Result;
+use crate::page::PageTracker;
 
 // Use std, external crates
 use ash::vk::{Buffer, BufferCreateInfo, BufferUsageFlags, SharingMode};
@@ -36,6 +37,7 @@ pub(crate) struct SharedContext {
     pub(crate) cmd_manager: CommandManager,
     pub(crate) pipeline: PipelineManager,
     pub(crate) allocator: ManuallyDrop<AllocationManager>,
+    pub(crate) page_tracker: PageTracker,
 }
 
 /// Represents the primary GPU device handle and core entry point for the engine.
@@ -104,6 +106,7 @@ impl Device {
             cmd_manager,
             pipeline,
             gc,
+            page_tracker: PageTracker::new(),
         });
 
         Ok(Self { shared })
@@ -269,10 +272,12 @@ impl Device {
     }
 
     pub fn dispatch(&self) -> Result<u64> {
-        let mut allocator = self.shared.allocator.inner.lock();
-        self.shared
-            .cmd_manager
-            .dispatch(&self.shared.pipeline, &self.shared.gc, &mut *allocator)
+        self.shared.cmd_manager.dispatch(
+            &self.shared.pipeline,
+            &self.shared.gc,
+            &self.shared.allocator,
+            &self.shared.page_tracker,
+        )
     }
 }
 
@@ -289,9 +294,11 @@ impl Drop for SharedContext {
             self.pipeline.destroy();
 
             {
-                let mut alloc_guard = self.allocator.inner.lock();
-                self.gc
-                    .destroy(&self.core.logical_device, &mut *alloc_guard);
+                self.gc.destroy(
+                    &self.core.logical_device,
+                    &self.allocator,
+                    &self.page_tracker,
+                );
             }
 
             self.cmd_manager.destroy();

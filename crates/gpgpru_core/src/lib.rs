@@ -9,6 +9,7 @@ mod buffer;
 mod device;
 mod error;
 mod kernel;
+mod page;
 
 pub mod prelude;
 
@@ -31,4 +32,6 @@ pub mod __private {
     };
     pub use crate::buffer::{AsGpuBuffer, LocationInfo};
     pub use crate::device::{CommandBuilder, Task};
+
+    pub use crate::page::{AccessType, HazardTrace};
 }

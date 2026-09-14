@@ -13,5 +13,4 @@ quote = { workspace = true }
 proc-macro2 = { workspace = true }
 shader-slang = "0.1.0"
 cargo_metadata = "0.23.1"
-hex = "0.4.3"
 rustc-hash = "2.1.3"

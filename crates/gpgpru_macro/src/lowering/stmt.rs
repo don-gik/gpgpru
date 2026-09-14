@@ -104,7 +104,7 @@ impl LoweringBuilder {
                 };
 
                 let var_id = self.alloc_var(name.clone(), VarStorage::Local);
-                self.insert_scope(name, var_id, syn_stmt.span());
+                self.insert_scope(name, var_id, syn_stmt.span())?;
 
                 Ok(self.push_stmt(IrStmt::Let {
                     var: var_id,

@@ -6,7 +6,6 @@ use super::writer::CodeWriter;
 use crate::IrStmt;
 use crate::IrStmt::*;
 
-use crate::IrExpr;
 use crate::IrExpr::*;
 
 use crate::{VarId, VarStorage};
@@ -361,7 +360,7 @@ impl LoweringBuilder {
                 SystemBinding::GlobalIdY => w.write("_sv_thread_id.y"),
                 SystemBinding::GlobalIdZ => w.write("_sv_thread_id.z"),
                 SystemBinding::GlobalId => w.write("_sv_thread_id"),
-                _ => w.write(name),
+                // _ => w.write(name),
             },
 
             _ => {

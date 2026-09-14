@@ -6,14 +6,6 @@ use shader_slang::{
     Blob, CompileTarget, CompilerOptions, Downcast, GlobalSession, SessionDesc, TargetDesc,
 };
 
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        None => String::new(),
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-    }
-}
-
 fn blob_to_u32_slice(blob: &Blob) -> Vec<u32> {
     let byte_slice: &[u8] = blob.as_slice();
     let byte_len = byte_slice.len();

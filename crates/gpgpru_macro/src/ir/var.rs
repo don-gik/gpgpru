@@ -24,12 +24,3 @@ pub struct VarInfo {
     pub name: String,
     pub kind: VarStorage,
 }
-
-impl VarInfo {
-    pub fn new(name: impl Into<String>, kind: VarStorage) -> Self {
-        Self {
-            name: name.into(),
-            kind,
-        }
-    }
-}

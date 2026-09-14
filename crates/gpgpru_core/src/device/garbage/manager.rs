@@ -1,8 +1,8 @@
 // src/device/garbage/manager.rs
 
 use super::{Collectable, GarbageManager, Zombie};
-
-use gpu_allocator::vulkan::Allocator;
+use crate::device::AllocationManager;
+use crate::page::PageTracker;
 
 use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
@@ -25,7 +25,8 @@ impl GarbageManager {
     pub(crate) fn cleanup(
         &self,
         device: &ash::Device,
-        allocator: &mut Allocator,
+        alloc_manager: &AllocationManager,
+        page_tracker: &PageTracker,
         current_gpu_timeline: u64,
     ) {
         let mut active = self.active.lock();
@@ -38,7 +39,7 @@ impl GarbageManager {
             if zombie.target_timeline <= current_gpu_timeline {
                 // Use option to take & destroy
                 if let Some(payload) = zombie.payload.take() {
-                    payload.dispose(device, allocator);
+                    payload.dispose(device, alloc_manager, page_tracker);
                 }
                 false // Memory is Dropped.
             } else {
@@ -47,18 +48,23 @@ impl GarbageManager {
         });
     }
 
-    pub(crate) unsafe fn destroy(&mut self, device: &ash::Device, allocator: &mut Allocator) {
+    pub(crate) unsafe fn destroy(
+        &mut self,
+        device: &ash::Device,
+        alloc_manager: &AllocationManager,
+        page_tracker: &PageTracker,
+    ) {
         let mut active = self.active.lock();
         active.retain_mut(|zombie| {
             if let Some(payload) = zombie.payload.take() {
-                payload.dispose(device, allocator);
+                payload.dispose(device, alloc_manager, page_tracker);
             }
             false
         });
 
         while let Some(mut zombie) = self.pending.pop() {
             if let Some(payload) = zombie.payload.take() {
-                payload.dispose(device, allocator);
+                payload.dispose(device, alloc_manager, page_tracker);
             }
         }
     }
