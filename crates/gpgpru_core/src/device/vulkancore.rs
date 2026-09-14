@@ -207,6 +207,9 @@ impl VulkanCore {
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities);
 
+        // Vulkan Int64 feature
+        let features = ash::vk::PhysicalDeviceFeatures::default().shader_int64(true);
+
         // Vulkan 1.2 feature
         let mut features_12 = PhysicalDeviceVulkan12Features::default()
             .timeline_semaphore(true)
@@ -222,6 +225,7 @@ impl VulkanCore {
 
         let device_create_info = DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
+            .enabled_features(&features)
             .push_next(&mut features_12)
             .push_next(&mut features_13);
 
