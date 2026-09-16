@@ -29,11 +29,12 @@ pub fn compile_slang(
 ) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
     let metadata = cargo_metadata::MetadataCommand::new().exec()?;
     let target_dir = metadata.target_directory;
+    let target_cache_dir = target_dir.join("gpgpru");
 
-    std::fs::create_dir_all(&target_dir)?;
+    std::fs::create_dir_all(&target_cache_dir)?;
 
     let file_name = format!("{}_{}.slang", entry_point_name, unique_hash);
-    let full_path = target_dir.join(&file_name);
+    let full_path = target_cache_dir.join(&file_name);
 
     std::fs::write(&full_path, slang_code)?;
 

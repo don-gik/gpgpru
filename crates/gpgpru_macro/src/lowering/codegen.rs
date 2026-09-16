@@ -10,8 +10,9 @@ use crate::IrExpr::*;
 
 use crate::{VarId, VarStorage};
 
+use crate::rust_emit::FieldInfo;
 use crate::types::ToSlangString;
-use crate::{ComputeAttr, ExprId, GpuType, ParsedSignature, StmtId, SystemBinding};
+use crate::{ComputeAttr, ExprId, StmtId, SystemBinding};
 
 fn unop_to_string(op: &syn::UnOp) -> &'static str {
     use syn::UnOp::*;
@@ -49,28 +50,25 @@ fn binop_to_string(op: &syn::BinOp) -> &'static str {
 }
 
 impl LoweringBuilder {
-    pub fn emit_slang_code(
+    pub fn emit_slang_fn(
         &self,
         fn_name: &str,
         attr: &ComputeAttr,
-        sig: &ParsedSignature,
+        pushed_fields: &Vec<FieldInfo>,
         block_id: &StmtId,
     ) -> String {
         let mut code = String::new();
 
         code.push_str("struct PushConstants {\n");
-        for (name, gpu_type) in &sig.pushed_fields {
-            match gpu_type {
-                GpuType::Slice { .. } => {
-                    code.push_str(&format!("    uint64_t _gpu_{}_ptr;\n", name));
-                    code.push_str(&format!("    uint32_t _gpu_{}_len;\n", name));
-                }
-                _ => {
-                    let slang_ty = &gpu_type.to_slang_string();
-                    code.push_str(&format!("    {} {};\n", slang_ty, name));
-                }
-            }
+
+        for info in pushed_fields {
+            code.push_str(&format!(
+                "    {} {};\n",
+                &info.ty.to_slang_string(),
+                &info.name
+            ));
         }
+
         code.push_str("};\n\n");
 
         code.push_str("[vk::push_constant]\n");
@@ -179,6 +177,8 @@ impl LoweringBuilder {
                 if let Some(bin_op) = op {
                     let bin_op_str = quote::quote!(#bin_op).to_string();
                     w.write(&format!(" {}= ", bin_op_str));
+                } else {
+                    w.write(" = ");
                 }
 
                 self.emit_expr(value, w);

@@ -2,12 +2,10 @@
 
 use super::{AsGpuBuffer, BufferTrash, LocationInfo};
 use super::{CpuToGpu, GpuOnly, GpuToCpu, Shared};
-use crate::__private::UpdateTimeline;
 use crate::device::{Collectable, SharedContext};
 
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use ash::vk::Buffer;
 use gpu_allocator::vulkan::Allocation;
@@ -15,7 +13,6 @@ use gpu_allocator::vulkan::Allocation;
 pub struct GpuBuffer<T, Loc: LocationInfo = GpuOnly> {
     pub(crate) buffer: Buffer,
     pub(crate) allocation: Option<Allocation>,
-    pub(crate) last_submitted_timeline: AtomicU64,
 
     device_address: u64,
     size: u64,
@@ -43,12 +40,19 @@ impl<T, Loc: LocationInfo> AsGpuBuffer<T> for GpuBuffer<T, Loc> {
     fn size(&self) -> u64 {
         self.size
     }
+
+    fn is_host_visible(&self) -> bool {
+        Loc::IS_HOST_VISIBLE
+    }
 }
 
 impl<T, Loc: LocationInfo> Drop for GpuBuffer<T, Loc> {
     fn drop(&mut self) {
         if let Some(allocation) = self.allocation.take() {
-            let target_timeline = self.last_submitted_timeline.load(Ordering::Relaxed);
+            let target_timeline = self
+                .shared
+                .page_tracker
+                .get_last_access_epoch(self.base_device_address());
 
             let trash = BufferTrash {
                 buffer: self.buffer,
@@ -116,7 +120,6 @@ impl<T, Loc: LocationInfo> GpuBuffer<T, Loc> {
     pub(crate) fn new(
         buffer: Buffer,
         allocation: Option<Allocation>,
-        last_submitted_timeline: AtomicU64,
         device_address: u64,
         size: u64,
         shared: Arc<SharedContext>,
@@ -125,7 +128,6 @@ impl<T, Loc: LocationInfo> GpuBuffer<T, Loc> {
         Self {
             buffer,
             allocation,
-            last_submitted_timeline,
             device_address,
             size,
             shared,
@@ -148,14 +150,21 @@ impl<'a, T> AsGpuBuffer<T> for BufferSlice<'a, T> {
     fn vk_buffer(&self) -> Buffer {
         self.parent.vk_buffer()
     }
+
     fn base_device_address(&self) -> u64 {
         self.parent.base_device_address()
     }
+
     fn offset(&self) -> u64 {
         self.offset
     }
+
     fn size(&self) -> u64 {
         self.size
+    }
+
+    fn is_host_visible(&self) -> bool {
+        self.parent.is_host_visible()
     }
 }
 
@@ -180,20 +189,5 @@ impl<'a, T> BufferSlice<'a, T, Shared> {
         let count = (self.size / elem_size) as usize;
 
         &parent_slice[start_idx..start_idx + count]
-    }
-}
-
-// ----------------------------------------------
-
-impl<T, Loc: LocationInfo> UpdateTimeline for GpuBuffer<T, Loc> {
-    fn __update_timeline(&self, signal_value: u64) {
-        self.last_submitted_timeline
-            .fetch_max(signal_value, Ordering::Relaxed);
-    }
-}
-
-impl<'a, T, Loc: LocationInfo> UpdateTimeline for BufferSlice<'a, T, Loc> {
-    fn __update_timeline(&self, signal_value: u64) {
-        self.parent.__update_timeline(signal_value);
     }
 }

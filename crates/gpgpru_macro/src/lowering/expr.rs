@@ -5,6 +5,46 @@ use crate::{ExprId, IrExpr, LiteralKind};
 
 use syn::spanned::Spanned;
 
+fn parse_lit_for_slang(lit: &syn::Lit) -> syn::Result<(String, &'static str)> {
+    match lit {
+        syn::Lit::Float(f) => {
+            let digits = f.base10_digits();
+            let slang_type = match f.suffix() {
+                "f64" => "double",
+                "f32" | "" => "float",
+                s => {
+                    return Err(syn::Error::new_spanned(
+                        f,
+                        format!("Unsupported float suffix: {}", s),
+                    ));
+                }
+            };
+            Ok((digits.to_string(), slang_type))
+        }
+        syn::Lit::Int(i) => {
+            let digits = i.base10_digits();
+            let slang_type = match i.suffix() {
+                "u32" | "usize" => "uint",
+                "u64" => "uint64_t",
+                "i64" => "int64_t",
+                "i32" | "" => "int",
+                s => {
+                    return Err(syn::Error::new_spanned(
+                        i,
+                        format!("Unsupported int suffix: {}", s),
+                    ));
+                }
+            };
+            Ok((digits.to_string(), slang_type))
+        }
+        syn::Lit::Bool(b) => Ok((b.value.to_string(), "bool")),
+        _ => Err(syn::Error::new_spanned(
+            lit,
+            "Unsupported literal for array initialization",
+        )),
+    }
+}
+
 impl LoweringBuilder {
     pub fn lower_expr(&mut self, syn_expr: &syn::Expr) -> syn::Result<ExprId> {
         match syn_expr {
@@ -109,6 +149,40 @@ impl LoweringBuilder {
                 Ok(self.push_expr(IrExpr::Cast {
                     expr: expr_id,
                     target_type,
+                }))
+            }
+
+            // [0.0; 3] -> "{ 0.0, 0.0, 0.0 }"
+            syn::Expr::Repeat(e) => {
+                let count = match &*e.len {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Int(len_lit),
+                        ..
+                    }) => len_lit.base10_parse::<usize>().map_err(|_| {
+                        syn::Error::new_spanned(len_lit, "Array length must be a valid integer")
+                    })?,
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            &e.len,
+                            "Array length must be a literal integer",
+                        ));
+                    }
+                };
+
+                let (lit_val, slang_type) = match &*e.expr {
+                    syn::Expr::Lit(syn::ExprLit { lit, .. }) => parse_lit_for_slang(lit)?,
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            &e.expr,
+                            "Array repeat value must be a literal",
+                        ));
+                    }
+                };
+
+                let elements = vec![lit_val.as_str(); count].join(", ");
+
+                Ok(self.push_expr(IrExpr::Literal {
+                    value: format!("{}[{}]({})", slang_type, count, elements),
                 }))
             }
 

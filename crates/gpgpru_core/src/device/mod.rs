@@ -26,7 +26,7 @@ use crate::Result;
 use crate::page::PageTracker;
 
 // Use std, external crates
-use ash::vk::{Buffer, BufferCreateInfo, BufferUsageFlags, SharingMode};
+use ash::vk::{Buffer, BufferCreateInfo, BufferUsageFlags, SemaphoreWaitInfo, SharingMode};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use tracing::error;
@@ -114,6 +114,42 @@ impl Device {
 }
 
 impl Device {
+    #[inline]
+    pub(crate) fn pending_epoch(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.shared
+            .cmd_manager
+            .next_semaphore_value
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn wait_timeline(&self, value: u64) -> Result<()> {
+        if value == 0 {
+            return Ok(());
+        }
+
+        let semaphore = self.shared.cmd_manager.timeline_semaphore;
+        let wait_info = SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&semaphore))
+            .values(std::slice::from_ref(&value));
+
+        unsafe {
+            self.shared
+                .core
+                .logical_device
+                .wait_semaphores(&wait_info, u64::MAX)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn wait_idle(&self) -> Result<()> {
+        unsafe {
+            self.shared.core.logical_device.device_wait_idle()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn immediate_upload<T>(&self, dst_buffer: Buffer, data: &[T]) -> Result<()> {
         let size = (std::mem::size_of_val(data)) as u64;
         if size == 0 {

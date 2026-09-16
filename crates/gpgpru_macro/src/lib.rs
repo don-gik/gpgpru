@@ -45,14 +45,23 @@ fn compute_impl(attr: TokenStream2, item_fn: TokenStream2) -> syn::Result<TokenS
     // Signature Parsing
     let parsed_sig = parse_kernel_signature(&input_fn)?;
 
+    // Generate Entry
+    let entry_info = rust_emit::generate_entry(&input_fn)?;
+
+    let fn_generics_token = &entry_info.fn_generics_token;
+    let where_clauses_token = &entry_info.where_clauses_token;
+    let wrapper_args_token = &entry_info.wrapper_args_token;
+    let struct_token = &entry_info.struct_token;
+    let struct_info = &entry_info.struct_info;
+
     // Lowering IR & CodeGen
     let mut builder = LoweringBuilder::new(&parsed_sig);
     let block_id: StmtId = builder.lower_block(fn_body)?;
 
-    let slang_code: String = builder.emit_slang_code(
+    let slang_code: String = builder.emit_slang_fn(
         fn_sig.ident.to_string().as_str(),
         &compute_attr,
-        &parsed_sig,
+        &struct_info,
         &block_id,
     );
 
@@ -71,7 +80,7 @@ fn compute_impl(attr: TokenStream2, item_fn: TokenStream2) -> syn::Result<TokenS
     let is_rust_analyzer =
         std::env::var("RUST_ANALYZER").is_ok() || std::env::var("RA_RUST_ANALYZER").is_ok();
 
-    let cache_dir = PathBuf::from("target/slang_cache");
+    let cache_dir = PathBuf::from("target/gpgpru");
     let _ = fs::create_dir_all(&cache_dir);
 
     let slang_path = cache_dir.join(format!(
@@ -148,9 +157,6 @@ fn compute_impl(attr: TokenStream2, item_fn: TokenStream2) -> syn::Result<TokenS
         }
     }
 
-    // Generate Entry
-    let (wrapper_args_token, struct_token) = rust_emit::generate_entry(&input_fn)?;
-
     let uppercase_name = fn_sig.ident.to_string().to_uppercase();
     let source_ident = quote::format_ident!("{}_SOURCE", uppercase_name);
 
@@ -161,7 +167,12 @@ fn compute_impl(attr: TokenStream2, item_fn: TokenStream2) -> syn::Result<TokenS
     let generated_tokens = quote::quote! {
         #(#orig_docs)*
         #[doc = #param_doc_markdown]
-        #fn_vis fn #fn_ident(#wrapper_args_token) -> gpgpru::__private::CommandBuilder<impl gpgpru::__private::HazardTrace + Copy> {
+        #fn_vis fn #fn_ident<#fn_generics_token>(#wrapper_args_token) -> gpgpru::__private::CommandBuilder<
+            'a,
+            impl gpgpru::__private::HazardTrace + Copy + 'a,
+        > where
+            #where_clauses_token
+        {
             #struct_token
 
             const #source_ident: &[u32] = #bytes_token;

@@ -7,7 +7,6 @@ use crate::{Device, GpuBuffer};
 use ash::vk;
 
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicU64;
 
 pub enum BufferSource<'a, T> {
     Data(&'a [T]),
@@ -156,15 +155,17 @@ impl<'a, T, CurrentLoc: LocationInfo> BufferBuilder<'a, T, CurrentLoc> {
                 .get_buffer_device_address(&addr_info)
         };
 
-        Ok(GpuBuffer::new(
+        // Creating and flushing the buffer
+        let gpu_buf = GpuBuffer::new(
             buffer,
             Some(allocation),
-            AtomicU64::new(0),
             device_address,
             size,
             device.shared.clone(),
             PhantomData,
-        ))
+        );
+
+        Ok(gpu_buf)
     }
 }
 
@@ -187,6 +188,26 @@ fn read_buffer_internal<T: Copy, Loc: LocationInfo>(
     device: &Device,
 ) -> Result<()> {
     let size = buffer.size() as usize;
+
+    let last_written_epoch = device
+        .shared
+        .page_tracker
+        .get_last_write_epoch(buffer.base_device_address());
+    // dbg!(last_written_epoch);
+
+    let wait_info = ash::vk::SemaphoreWaitInfo::default()
+        .semaphores(std::slice::from_ref(
+            &device.shared.cmd_manager.timeline_semaphore,
+        ))
+        .values(std::slice::from_ref(&last_written_epoch));
+
+    unsafe {
+        device
+            .shared
+            .core
+            .logical_device
+            .wait_semaphores(&wait_info, u64::MAX)?;
+    }
 
     if let Some(alloc) = buffer.allocation.as_ref() {
         if let Some(mapped_ptr) = alloc.mapped_ptr() {

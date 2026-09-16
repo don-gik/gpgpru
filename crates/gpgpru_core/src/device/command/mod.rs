@@ -21,9 +21,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ash::vk::{
     AccessFlags2, CommandBuffer, CommandBufferAllocateInfo, CommandBufferBeginInfo,
     CommandBufferLevel, CommandBufferSubmitInfo, CommandBufferUsageFlags, CommandPool,
-    CommandPoolCreateFlags, CommandPoolCreateInfo, Fence, PipelineBindPoint, PipelineLayout,
-    PipelineStageFlags2, Semaphore, SemaphoreCreateInfo, SemaphoreSubmitInfo, SemaphoreType,
-    SemaphoreTypeCreateInfo, ShaderStageFlags, SubmitInfo2,
+    CommandPoolCreateFlags, CommandPoolCreateInfo, DependencyInfo, Fence, MemoryBarrier2,
+    PipelineBindPoint, PipelineLayout, PipelineStageFlags2, Semaphore, SemaphoreCreateInfo,
+    SemaphoreSubmitInfo, SemaphoreType, SemaphoreTypeCreateInfo, ShaderStageFlags, SubmitInfo2,
 };
 
 // use parking_lot::Mutex;
@@ -103,38 +103,43 @@ impl CommandManager {
         self.task_queue.push_task(task);
     }
 
-    fn record_task_barriers(
-        &self,
-        cmd_buffer: ash::vk::CommandBuffer,
-        task: &Task,
-        page_tracker: &PageTracker,
-        current_value: u64,
-        completed_value: u64,
-    ) {
-        let mut accum_src = AccessFlags2::empty();
-        let mut accum_dst = AccessFlags2::empty();
+    fn record_task_barriers(&self, cmd_buffer: ash::vk::CommandBuffer, task: &Task) {
+        if !task.hazards.need_barrier {
+            return;
+        }
 
-        (task.trace_fn)(&task.push_constants, &mut |bda, size, access| {
-            if let Some(hazard) =
-                page_tracker.check_and_update(bda, size, access, current_value, completed_value)
-            {
-                if hazard.need_barrier {
-                    accum_src |= hazard.src_access;
-                    accum_dst |= hazard.dst_access;
-                }
-            }
-        });
+        let src_stage = if task.hazards.src_access.is_empty() {
+            PipelineStageFlags2::TOP_OF_PIPE
+        } else {
+            PipelineStageFlags2::COMPUTE_SHADER
+        };
 
-        // Barrier
-        if !accum_src.is_empty() || !accum_dst.is_empty() {
-            let memory_barrier = ash::vk::MemoryBarrier2::default()
+        let memory_barrier = MemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .src_access_mask(task.hazards.src_access)
+            .dst_stage_mask(PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(task.hazards.dst_access);
+
+        let dependency_info =
+            DependencyInfo::default().memory_barriers(std::slice::from_ref(&memory_barrier));
+
+        unsafe {
+            self.core
+                .logical_device
+                .cmd_pipeline_barrier2(cmd_buffer, &dependency_info);
+        }
+    }
+
+    fn record_post_task_barriers(&self, cmd_buffer: ash::vk::CommandBuffer, task: &Task) {
+        if task.has_write {
+            let post_barrier = MemoryBarrier2::default()
                 .src_stage_mask(PipelineStageFlags2::COMPUTE_SHADER)
-                .src_access_mask(accum_src)
-                .dst_stage_mask(PipelineStageFlags2::COMPUTE_SHADER)
-                .dst_access_mask(accum_dst);
+                .src_access_mask(AccessFlags2::SHADER_WRITE)
+                .dst_stage_mask(PipelineStageFlags2::HOST)
+                .dst_access_mask(AccessFlags2::HOST_READ);
 
-            let dependency_info = ash::vk::DependencyInfo::default()
-                .memory_barriers(std::slice::from_ref(&memory_barrier));
+            let dependency_info =
+                DependencyInfo::default().memory_barriers(std::slice::from_ref(&post_barrier));
 
             unsafe {
                 self.core
@@ -152,11 +157,6 @@ impl CommandManager {
         page_tracker: &PageTracker,
     ) -> Result<u64> {
         let current_value = self.next_semaphore_value.load(Ordering::Relaxed) - 1;
-        let completed_value = unsafe {
-            self.core
-                .logical_device
-                .get_semaphore_counter_value(self.timeline_semaphore)?
-        };
 
         gc_manager.cleanup(
             &self.core.logical_device,
@@ -203,13 +203,7 @@ impl CommandManager {
         let mut current_layout: PipelineLayout = PipelineLayout::null();
 
         for task in tasks {
-            self.record_task_barriers(
-                cmd_buffer,
-                &task,
-                page_tracker,
-                current_value,
-                completed_value,
-            );
+            self.record_task_barriers(cmd_buffer, &task);
 
             // Pipeline Binding
             if current_pipeline_id != Some(task.pipeline_id) {
@@ -248,6 +242,8 @@ impl CommandManager {
                     task.dispatch_size.2,
                 );
             }
+
+            self.record_post_task_barriers(cmd_buffer, &task);
         }
 
         unsafe {
@@ -258,6 +254,17 @@ impl CommandManager {
         let signal_value = self.next_semaphore_value.fetch_add(1, Ordering::SeqCst);
         let cmd_buffer_info = CommandBufferSubmitInfo::default().command_buffer(cmd_buffer);
 
+        let wait_info = if current_value > 0 {
+            vec![
+                SemaphoreSubmitInfo::default()
+                    .semaphore(self.timeline_semaphore)
+                    .value(current_value)
+                    .stage_mask(PipelineStageFlags2::COMPUTE_SHADER),
+            ]
+        } else {
+            vec![]
+        };
+
         // Semaphore
         let signal_info = SemaphoreSubmitInfo::default()
             .semaphore(self.timeline_semaphore)
@@ -266,6 +273,7 @@ impl CommandManager {
 
         let submit_info2 = SubmitInfo2::default()
             .command_buffer_infos(std::slice::from_ref(&cmd_buffer_info))
+            .wait_semaphore_infos(&wait_info)
             .signal_semaphore_infos(std::slice::from_ref(&signal_info));
 
         // Queue Submit2 (Non-blocking)

@@ -1,6 +1,6 @@
 // src/device/command/command.rs
 
-use crate::__private::{HazardTrace, Task};
+use crate::__private::{AccessType, HazardTrace, Task};
 use crate::Device;
 use crate::Result;
 
@@ -52,7 +52,10 @@ pub struct CommandBuilder<'a, T: Copy> {
     push_data: T,
 }
 
-impl<'a, T: Copy + HazardTrace> CommandBuilder<'a, T> {
+impl<'a, T> CommandBuilder<'a, T>
+where
+    T: Copy + HazardTrace,
+{
     pub fn new(spirv_code: &'a [u32], push_data: T) -> Self {
         let size = std::mem::size_of::<T>();
         assert!(size <= 128, "Push constants size exceeds 128 bytes");
@@ -70,15 +73,37 @@ impl<'a, T: Copy + HazardTrace> CommandBuilder<'a, T> {
     }
 
     fn prepare_task(&self, device: &Device, workgroup: impl IntoWorkgroup) -> Result<Task> {
-        let dispatch_size = workgroup.into_workgroup();
-        let task_prebake = Task::new(&self.push_data, dispatch_size);
-        let pipeline_id = device.get_pipeline(
-            self.spirv_code,
-            task_prebake.push_constants_size,
-            self.entry_point,
-        )?;
+        let mut task = Task::new(&self.push_data, workgroup.into_workgroup());
+        let pipeline_id =
+            device.get_pipeline(self.spirv_code, task.push_constants_size, self.entry_point)?;
 
-        Ok(task_prebake.pipeline_id(pipeline_id))
+        let target_epoch = device.pending_epoch();
+        task.target_epoch = target_epoch;
+
+        let mut has_write = false;
+
+        self.push_data.trace_hazards(&mut |bda, size, access| {
+            if let Some(hazard) =
+                device
+                    .shared
+                    .page_tracker
+                    .check_and_update(bda, size, access, target_epoch)
+            {
+                // dbg!(&hazard);
+                task.hazards.need_barrier = true;
+                task.hazards.src_access |= hazard.src_access;
+                task.hazards.dst_access |= hazard.dst_access;
+            }
+            if access == AccessType::Write {
+                has_write = true;
+            }
+        });
+
+        task.has_write = has_write;
+
+        // dbg!(&task.hazards);
+
+        Ok(task.pipeline_id(pipeline_id))
     }
 
     pub fn with(&self, device: &Device, workgroup: impl IntoWorkgroup) -> Result<u64> {
@@ -86,14 +111,12 @@ impl<'a, T: Copy + HazardTrace> CommandBuilder<'a, T> {
         device.push_command(task);
 
         let signal_value = device.dispatch()?;
-
         Ok(signal_value)
     }
 
     pub fn queue(&self, device: &Device, workgroup: impl IntoWorkgroup) -> Result<()> {
         let task = self.prepare_task(device, workgroup)?;
         device.push_command(task);
-
         Ok(())
     }
 }

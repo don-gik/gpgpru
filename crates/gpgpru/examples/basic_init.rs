@@ -9,6 +9,8 @@ fn scale(data: &mut [f32], factor: f32, global_id_x: GlobalIdX) {
     if idx < data.len() {
         data[idx] *= factor;
     }
+
+    let stuff = [0.0; 3];
 }
 
 fn main() -> Result<()> {

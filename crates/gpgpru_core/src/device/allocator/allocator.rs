@@ -5,31 +5,29 @@ use crate::{AllocDesc, Result};
 
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use std::sync::atomic::Ordering;
-use tracing::trace;
+// use tracing::trace;
 
 impl AllocationManager {
     /// Allocate memory using manager.
     pub(crate) fn allocate(&self, desc: AllocDesc) -> Result<Allocation> {
         let mut allocator = self.inner.lock();
 
+        let mut requirements = desc.requirements;
+        requirements.alignment = requirements.alignment.max(4096);
+
         let allocation = allocator.allocate(&AllocationCreateDesc {
             name: desc.name,
-            requirements: desc.requirements,
+            requirements,
             location: desc.location,
             linear: true,
             allocation_scheme: AllocationScheme::GpuAllocatorManaged,
         })?;
 
         let size = allocation.size();
-        let total = self.allocated_bytes.fetch_add(size, Ordering::Relaxed) + size;
+        self.allocated_bytes.fetch_add(size, Ordering::Relaxed);
         self.allocation_count.fetch_add(1, Ordering::Relaxed);
 
-        trace!(
-            name = desc.name,
-            bytes = size,
-            total_bytes = total,
-            "Buffer allocated"
-        );
+        // dbg!(desc.name, size, total, "Buffer allocated");
         Ok(allocation)
     }
 

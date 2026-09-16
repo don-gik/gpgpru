@@ -5,29 +5,6 @@ use super::*;
 use ash::vk::AccessFlags2;
 
 impl PageTracker {
-    // pub fn register_range(&self, bda: u64, size: u64) {
-    //     if size == 0 {
-    //         return;
-    //     }
-
-    //     let start_page = bda >> PAGE_SHIFT;
-    //     let end_page = (bda + size - 1) >> PAGE_SHIFT;
-
-    //     for page in start_page..=end_page {
-    //         let l1_index = (page >> 16) as usize;
-    //         let l2_index = (page & L2_MASK) as usize;
-
-    //         let slot = &self.directory[l1_index];
-    //         let mut write_guard = slot.write();
-
-    //         let l2_table = write_guard.get_or_insert_with(|| Box::new(L2Table::new()));
-    //         let page_meta = &l2_table.pages[l2_index];
-
-    //         page_meta.last_read_epoch.store(0, Ordering::Relaxed);
-    //         page_meta.last_write_epoch.store(0, Ordering::Relaxed);
-    //     }
-    // }
-
     pub fn unregister_range(&self, bda: u64, size: u64) {
         if size == 0 {
             return;
@@ -35,20 +12,45 @@ impl PageTracker {
 
         let start_page = bda >> PAGE_SHIFT;
         let end_page = (bda + size - 1) >> PAGE_SHIFT;
+        let mut current_page = start_page;
 
-        for page in start_page..=end_page {
-            let l1_index = (page >> 16) as usize;
-            let l2_index = (page & L2_MASK) as usize;
+        while current_page <= end_page {
+            let l1_index = (current_page >> L2_BITS) as usize;
+            let l1_end_page = ((l1_index as u64 + 1) << L2_BITS) - 1;
+            let chunk_end_page = end_page.min(l1_end_page);
+
+            // dbg!(start_page, end_page, l1_index, chunk_end_page);
 
             let slot = &self.directory[l1_index];
             let read_guard = slot.read();
 
             if let Some(l2_table) = read_guard.as_ref() {
-                let page_meta = &l2_table.pages[l2_index];
-                page_meta.last_read_epoch.store(0, Ordering::Relaxed);
-                page_meta.last_write_epoch.store(0, Ordering::Relaxed);
+                for page in current_page..=chunk_end_page {
+                    let l2_index = (page & L2_MASK) as usize;
+                    l2_table.pages[l2_index].reset();
+                }
+            }
+
+            current_page = chunk_end_page + 1;
+        }
+    }
+
+    #[inline]
+    fn with_l2<R>(&self, l1_index: usize, f: impl FnOnce(&L2Table) -> R) -> R {
+        let slot = &self.directory[l1_index];
+
+        // 1. Fast Path
+        {
+            let read_guard = slot.read();
+            if let Some(l2) = read_guard.as_ref() {
+                return f(l2);
             }
         }
+
+        // 2. Slow Path
+        let mut write_guard = slot.write();
+        let l2 = write_guard.get_or_insert_with(|| Box::new(L2Table::new()));
+        f(l2)
     }
 
     pub fn check_and_update(
@@ -57,7 +59,6 @@ impl PageTracker {
         size: u64,
         access: AccessType,
         current_epoch: u64,
-        gpu_completed_epoch: u64,
     ) -> Option<HazardResult> {
         if size == 0 {
             return None;
@@ -66,68 +67,96 @@ impl PageTracker {
         let start_page = bda >> PAGE_SHIFT;
         let end_page = (bda + size - 1) >> PAGE_SHIFT;
 
+        // dbg!(bda, size, access, start_page, end_page);
+
         let mut raw_hazard = false;
         let mut war_hazard = false;
         let mut waw_hazard = false;
 
-        for page in start_page..=end_page {
-            let l1_index = (page >> 16) as usize;
-            let l2_index = (page & L2_MASK) as usize;
+        let mut current_page = start_page;
 
-            let read_guard = &self.directory[l1_index].read();
-            if let Some(l2_table) = read_guard.as_ref() {
-                let page_meta = &l2_table.pages[l2_index];
+        while current_page <= end_page {
+            let l1_index = (current_page >> L2_BITS) as usize;
+            let l1_end_page = ((l1_index as u64 + 1) << L2_BITS) - 1;
+            let chunk_end_page = end_page.min(l1_end_page);
 
-                let last_write = page_meta.last_write_epoch.load(Ordering::Relaxed);
-                let last_read = page_meta.last_read_epoch.load(Ordering::Relaxed);
+            // dbg!(l1_index, l1_end_page, chunk_end_page);
 
-                match access {
-                    AccessType::Read => {
-                        // RAW
-                        if last_write > gpu_completed_epoch {
-                            raw_hazard = true;
-                        }
+            self.with_l2(l1_index, |l2_table| {
+                for page in current_page..=chunk_end_page {
+                    let l2_index = (page & L2_MASK) as usize;
+                    let page_meta = &l2_table.pages[l2_index];
 
-                        page_meta
-                            .last_read_epoch
-                            .fetch_max(current_epoch, Ordering::Relaxed);
-                    }
-
-                    AccessType::Write => {
-                        // WAR
-                        if last_read > gpu_completed_epoch {
-                            war_hazard = true;
-                        }
-
-                        // WAW
-                        if last_write > gpu_completed_epoch {
-                            waw_hazard = true;
-                        }
-
-                        page_meta
-                            .last_write_epoch
-                            .store(current_epoch, Ordering::Relaxed);
-                    }
+                    let (raw, war, waw) =
+                        page_meta.update(access == AccessType::Write, current_epoch);
+                    raw_hazard |= raw;
+                    war_hazard |= war;
+                    waw_hazard |= waw;
                 }
-            }
+            });
+
+            current_page = chunk_end_page + 1;
         }
 
         if raw_hazard || war_hazard || waw_hazard {
+            let mut src_access = AccessFlags2::empty();
+            let mut dst_access = AccessFlags2::empty();
+
+            if raw_hazard || waw_hazard {
+                src_access |= AccessFlags2::SHADER_WRITE;
+            }
+            if war_hazard {
+                src_access |= AccessFlags2::SHADER_READ;
+            }
+
+            if access == AccessType::Write {
+                dst_access |= AccessFlags2::SHADER_WRITE;
+            } else {
+                dst_access |= AccessFlags2::SHADER_READ;
+            }
+
             Some(HazardResult {
                 need_barrier: true,
-                src_access: if raw_hazard || waw_hazard {
-                    AccessFlags2::SHADER_WRITE
-                } else {
-                    AccessFlags2::SHADER_READ
-                },
-                dst_access: if access == AccessType::Write {
-                    AccessFlags2::SHADER_WRITE
-                } else {
-                    AccessFlags2::SHADER_READ
-                },
+                src_access,
+                dst_access,
             })
         } else {
             None
+        }
+    }
+
+    pub fn get_last_write_epoch(&self, bda: u64) -> u64 {
+        let page = bda >> PAGE_SHIFT;
+        let l1_index = (page >> L2_BITS) as usize;
+        let l2_index = (page & L2_MASK) as usize;
+
+        let slot = &self.directory[l1_index];
+        let read_guard = slot.read();
+
+        let epoch = if let Some(l2_table) = read_guard.as_ref() {
+            l2_table.pages[l2_index].get_last_write()
+        } else {
+            0
+        };
+
+        // dbg!(bda, page, l1_index, l2_index, epoch);
+
+        epoch
+    }
+
+    pub fn get_last_access_epoch(&self, bda: u64) -> u64 {
+        let page = bda >> PAGE_SHIFT;
+        let l1_index = (page >> L2_BITS) as usize;
+        let l2_index = (page & L2_MASK) as usize;
+
+        let slot = &self.directory[l1_index];
+        let read_guard = slot.read();
+
+        if let Some(l2_table) = read_guard.as_ref() {
+            let meta = &l2_table.pages[l2_index];
+            std::cmp::max(meta.get_last_read(), meta.get_last_write())
+        } else {
+            0
         }
     }
 }

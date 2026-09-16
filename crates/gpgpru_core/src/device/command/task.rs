@@ -1,6 +1,9 @@
 // src/device/command/task.rs
 
-use crate::__private::{AccessType, HazardTrace};
+use ash::vk::AccessFlags2;
+
+use crate::__private::HazardTrace;
+use crate::page::HazardResult;
 
 pub struct Task {
     /// PipelineManager uses this hash.
@@ -9,7 +12,11 @@ pub struct Task {
     pub(crate) push_constants: [u8; 128],
     pub push_constants_size: u32,
     pub(crate) dispatch_size: (u32, u32, u32),
-    pub trace_fn: fn(&[u8], &mut dyn FnMut(u64, u64, AccessType)),
+    pub target_epoch: u64,
+
+    // For Hazards
+    pub hazards: HazardResult,
+    pub has_write: bool,
 }
 
 impl Task {
@@ -34,10 +41,13 @@ impl Task {
             push_constants,
             push_constants_size: size as u32,
             dispatch_size,
-            trace_fn: |bytes, visitor| {
-                let data = unsafe { &*(bytes.as_ptr() as *const T) };
-                data.trace_hazards(visitor);
+            target_epoch: 0,
+            hazards: HazardResult {
+                need_barrier: false,
+                src_access: AccessFlags2::empty(),
+                dst_access: AccessFlags2::empty(),
             },
+            has_write: true,
         }
     }
 

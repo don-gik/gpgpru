@@ -5,3 +5,5 @@ mod slang_code;
 
 pub use entry::generate_entry;
 pub use slang_code::compile_slang;
+
+pub use entry::FieldInfo;
