@@ -7,6 +7,7 @@ use portable_atomic::{AtomicU128, Ordering};
 
 use ash::vk::AccessFlags2;
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 
 pub use traits::HazardTrace;
 
@@ -15,6 +16,9 @@ pub const PAGE_SIZE: u64 = 1 << PAGE_SHIFT;
 
 pub const L2_BITS: u32 = 16;
 pub const L2_MASK: u64 = (1 << L2_BITS) - 1;
+
+pub const TASK_BITS: u32 = 16;
+pub const TASK_MASK: u64 = (1 << TASK_BITS) - 1;
 
 // ------------------------------------------------------------
 
@@ -29,6 +33,7 @@ pub struct HazardResult {
     pub need_barrier: bool,
     pub src_access: AccessFlags2,
     pub dst_access: AccessFlags2,
+    pub deps: SmallVec<[u16; 4]>,
 }
 
 // ------------------------------------------------------------
@@ -69,7 +74,12 @@ impl Default for PageMetadata {
 }
 
 impl PageMetadata {
-    pub fn update(&self, is_write: bool, current_epoch: u64) -> (bool, bool, bool) {
+    pub fn update(
+        &self,
+        is_write: bool,
+        current_encoded_epoch: u64,
+    ) -> (bool, bool, bool, SmallVec<[u16; 4]>) {
+        let current_dispatch = current_encoded_epoch >> TASK_BITS;
         let mut current_raw = self.state.load(Ordering::Acquire);
 
         loop {
@@ -82,22 +92,39 @@ impl PageMetadata {
             let mut raw = false;
             let mut war = false;
             let mut waw = false;
+            let mut deps = SmallVec::<[u16; 4]>::new();
 
             if !is_write {
                 // Read Access
                 if active_write > active_read {
                     raw = true;
                 }
-                next.last_read = current.last_read.max(current_epoch);
+                if active_write > 0 && (active_write >> TASK_BITS) == current_dispatch {
+                    let parent_idx = (active_write & TASK_MASK) as u16;
+                    deps.push(parent_idx);
+                }
+                next.last_read = current.last_read.max(current_encoded_epoch);
             } else {
                 // Write Access
-                if active_read > active_write {
+                if active_read > 0 && active_read >= active_write {
                     war = true;
                 }
                 if active_write > 0 {
                     waw = true;
                 }
-                next.last_write = current_epoch;
+
+                if active_read > 0 && (active_read >> TASK_BITS) == current_dispatch {
+                    let parent_idx = (active_read & TASK_MASK) as u16;
+                    deps.push(parent_idx);
+                }
+
+                if active_write > 0 && (active_write >> TASK_BITS) == current_dispatch {
+                    let parent_idx = (active_write & TASK_MASK) as u16;
+                    if !deps.contains(&parent_idx) {
+                        deps.push(parent_idx);
+                    }
+                }
+                next.last_write = current_encoded_epoch;
                 next.last_read = 0;
             }
 
@@ -107,7 +134,7 @@ impl PageMetadata {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return (raw, war, waw),
+                Ok(_) => return (raw, war, waw, deps),
                 Err(actual) => current_raw = actual,
             }
         }
@@ -118,11 +145,11 @@ impl PageMetadata {
     }
 
     pub fn get_last_write(&self) -> u64 {
-        PageState::unpack(self.state.load(Ordering::Acquire)).last_write
+        PageState::unpack(self.state.load(Ordering::Acquire)).last_write >> TASK_BITS
     }
 
     pub fn get_last_read(&self) -> u64 {
-        PageState::unpack(self.state.load(Ordering::Acquire)).last_read
+        PageState::unpack(self.state.load(Ordering::Acquire)).last_read >> TASK_BITS
     }
 }
 

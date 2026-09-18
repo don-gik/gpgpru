@@ -1,31 +1,28 @@
 // src/lowering/stmt.rs
 
 use super::LoweringBuilder;
-use crate::{
-    IrBlock, IrExpr, IrStmt, StmtId,
-    VarStorage, GpuType
-};
+use crate::{GpuType, IrBlock, IrExpr, IrStmt, LiteralKind, StmtId, TypeArena, VarStorage};
 
+use std::borrow::Cow;
 use syn::spanned::Spanned;
 
 fn is_assign_op(op: &syn::BinOp) -> bool {
     use syn::BinOp::*;
     matches!(
         op,
-        AddAssign(_)    // +=
-            | SubAssign(_)    // -=
-            | MulAssign(_)    // *=
-            | DivAssign(_)    // /=
-            | RemAssign(_)    // %=
-            
-            | ShlAssign(_)    // <<=
-            | ShrAssign(_) // >>=
+        AddAssign(_)
+            | SubAssign(_)
+            | MulAssign(_)
+            | DivAssign(_)
+            | RemAssign(_)
+            | ShlAssign(_)
+            | ShrAssign(_)
     )
 }
 
 fn to_pure_bin_op(op: &syn::BinOp) -> Option<syn::BinOp> {
     use syn::BinOp::*;
-    
+
     let pure_op = match op {
         AddAssign(_) => Add(Default::default()),
         SubAssign(_) => Sub(Default::default()),
@@ -36,34 +33,52 @@ fn to_pure_bin_op(op: &syn::BinOp) -> Option<syn::BinOp> {
         ShrAssign(_) => Shr(Default::default()),
         _ => return None,
     };
-    
+
     Some(pure_op)
 }
 
 impl LoweringBuilder {
-    pub fn lower_const(&mut self, local_const: &syn::ItemConst) -> syn::Result<StmtId> {
+    pub fn lower_const(
+        &mut self,
+        arena: &mut TypeArena,
+        local_const: &syn::ItemConst,
+    ) -> syn::Result<StmtId> {
         let name = local_const.ident.to_string();
-        let ty = GpuType::try_from(&*local_const.ty)?;
-        let init = self.lower_expr(&local_const.expr)?;
+        let ty = arena.lower_type(&*local_const.ty)?;
+        let init = self.lower_expr(arena, &local_const.expr)?;
 
-        let var_id = self.alloc_var(name.clone(), VarStorage::Const);
-        self.insert_scope(name, var_id, local_const.span())?;
+        let name_cow: Cow<'static, str> = Cow::Owned(name);
 
-        Ok(self.push_stmt(IrStmt::Const { var: var_id, ty, init }))
+        let var_id = self.alloc_var(name_cow.clone(), VarStorage::Const, ty);
+        self.insert_scope(name_cow, var_id, local_const.span())?;
+
+        Ok(self.push_stmt(IrStmt::Const {
+            var: var_id,
+            ty,
+            init,
+        }))
     }
 
-    pub fn lower_block(&mut self, syn_block: &syn::Block) -> syn::Result<StmtId> {
+    pub fn lower_block(
+        &mut self,
+        arena: &mut TypeArena,
+        syn_block: &syn::Block,
+    ) -> syn::Result<StmtId> {
         let stmts = self.with_scope(|builder| {
             syn_block
                 .stmts
                 .iter()
-                .map(|s| builder.lower_stmt(s))
+                .map(|s| builder.lower_stmt(arena, s))
                 .collect::<syn::Result<Vec<StmtId>>>()
         })?;
         Ok(self.push_stmt(IrStmt::Block(IrBlock { stmts })))
     }
 
-    pub fn lower_stmt(&mut self, syn_stmt: &syn::Stmt) -> syn::Result<StmtId> {
+    pub fn lower_stmt(
+        &mut self,
+        arena: &mut TypeArena,
+        syn_stmt: &syn::Stmt,
+    ) -> syn::Result<StmtId> {
         match syn_stmt {
             syn::Stmt::Local(local) => {
                 let pat_ident = match &local.pat {
@@ -88,14 +103,8 @@ impl LoweringBuilder {
                 let name = pat_ident.ident.to_string();
                 let is_mut = pat_ident.mutability.is_some();
 
-                let init_opt = local
-                    .init
-                    .as_ref()
-                    .map(|init| self.lower_expr(&init.expr))
-                    .transpose()?;
-
-                let init = if let Some(expr) = init_opt {
-                    expr
+                let init = if let Some(init) = &local.init {
+                    self.lower_expr(arena, &init.expr)?
                 } else {
                     return Err(syn::Error::new(
                         syn_stmt.span(),
@@ -103,8 +112,11 @@ impl LoweringBuilder {
                     ));
                 };
 
-                let var_id = self.alloc_var(name.clone(), VarStorage::Local);
-                self.insert_scope(name, var_id, syn_stmt.span())?;
+                let name_cow: Cow<'static, str> = Cow::Owned(name);
+                let init_ty = self.exprs[init.0].ty();
+
+                let var_id = self.alloc_var(name_cow.clone(), VarStorage::Local, init_ty);
+                self.insert_scope(name_cow, var_id, syn_stmt.span())?;
 
                 Ok(self.push_stmt(IrStmt::Let {
                     var: var_id,
@@ -114,7 +126,7 @@ impl LoweringBuilder {
             }
 
             syn::Stmt::Item(item) => match item {
-                syn::Item::Const(local_const) => self.lower_const(local_const),
+                syn::Item::Const(local_const) => self.lower_const(arena, local_const),
 
                 _ => Err(syn::Error::new_spanned(
                     item,
@@ -137,8 +149,8 @@ impl LoweringBuilder {
 
                 match expr {
                     syn::Expr::Assign(assign) => {
-                        let target = self.lower_expr(&assign.left)?;
-                        let value = self.lower_expr(&assign.right)?;
+                        let target = self.lower_expr(arena, &assign.left)?;
+                        let value = self.lower_expr(arena, &assign.right)?;
                         Ok(self.push_stmt(IrStmt::Assign {
                             target,
                             value,
@@ -147,11 +159,11 @@ impl LoweringBuilder {
                     }
 
                     syn::Expr::Binary(binary) if is_assign_op(&binary.op) => {
-                        let target = self.lower_expr(&binary.left)?;
-                        let value = self.lower_expr(&binary.right)?;
+                        let target = self.lower_expr(arena, &binary.left)?;
+                        let value = self.lower_expr(arena, &binary.right)?;
 
                         let pure_op = to_pure_bin_op(&binary.op);
-                        
+
                         Ok(self.push_stmt(IrStmt::Assign {
                             target,
                             value,
@@ -160,17 +172,21 @@ impl LoweringBuilder {
                     }
 
                     syn::Expr::Return(ret) => {
-                        let value = ret.expr.as_ref().map(|e| self.lower_expr(e)).transpose()?;
+                        let value = ret
+                            .expr
+                            .as_ref()
+                            .map(|e| self.lower_expr(arena, e))
+                            .transpose()?;
                         Ok(self.push_stmt(IrStmt::Return(value)))
                     }
 
                     syn::Expr::If(syn_if) => {
-                        let cond = self.lower_expr(&syn_if.cond)?;
-                        let then_block = self.lower_block(&syn_if.then_branch)?;
+                        let cond = self.lower_expr(arena, &syn_if.cond)?;
+                        let then_block = self.lower_block(arena, &syn_if.then_branch)?;
 
                         let else_branch = if let Some((_, else_expr)) = &syn_if.else_branch {
                             let else_stmt = syn::Stmt::Expr(*else_expr.clone(), None);
-                            let stmt_id = self.lower_stmt(&else_stmt)?;
+                            let stmt_id = self.lower_stmt(arena, &else_stmt)?;
                             Some(stmt_id)
                         } else {
                             None
@@ -193,9 +209,14 @@ impl LoweringBuilder {
                                 ));
                             }
                         };
+
+                        let loop_ty = arena.alloc(GpuType::Scalar(LiteralKind::Int32));
                         let loop_var_id =
-                            self.alloc_var(loop_var_ident.to_string(), VarStorage::Local);
-                        let loop_var_expr = self.push_expr(IrExpr::Var(loop_var_id));
+                            self.alloc_var(Cow::Owned(loop_var_ident), VarStorage::Local, loop_ty);
+                        let loop_var_expr = self.push_expr(IrExpr::Var {
+                            id: loop_var_id,
+                            ty: loop_ty,
+                        });
 
                         let mut is_reverse = false;
                         let mut custom_step: Option<&syn::Expr> = None;
@@ -234,15 +255,16 @@ impl LoweringBuilder {
 
                         // Start parse
                         let start = match &range.start {
-                            Some(s) => self.lower_expr(s)?,
+                            Some(s) => self.lower_expr(arena, s)?,
                             None => self.push_expr(IrExpr::Literal {
                                 value: "0".to_string(),
+                                ty: loop_ty,
                             }),
                         };
 
                         // End parse
                         let end = match &range.end {
-                            Some(e) => self.lower_expr(e)?,
+                            Some(e) => self.lower_expr(arena, e)?,
                             None => {
                                 return Err(syn::Error::new_spanned(
                                     &for_loop.expr,
@@ -251,29 +273,29 @@ impl LoweringBuilder {
                             }
                         };
 
-                        // Step
-
+                        // Step parse
                         let step_val = match custom_step {
-                            Some(expr) => self.lower_expr(expr)?,
+                            Some(expr) => self.lower_expr(arena, expr)?,
                             None => self.push_expr(IrExpr::Literal {
                                 value: "1".to_string(),
+                                ty: loop_ty,
                             }),
                         };
 
                         let (init_stmt, cond_expr, step_stmt);
 
                         if is_reverse {
-                            // Init: let i = (end - 1)
-
                             let init_val = match range.limits {
                                 syn::RangeLimits::HalfOpen(_) => {
                                     let one = self.push_expr(IrExpr::Literal {
                                         value: "1".to_string(),
+                                        ty: loop_ty,
                                     });
                                     self.push_expr(IrExpr::Binary {
                                         op: syn::BinOp::Sub(Default::default()),
                                         left: end,
                                         right: one,
+                                        ty: loop_ty,
                                     })
                                 }
                                 syn::RangeLimits::Closed(_) => end,
@@ -288,6 +310,7 @@ impl LoweringBuilder {
                                 op: syn::BinOp::Ge(Default::default()),
                                 left: loop_var_expr,
                                 right: start,
+                                ty: arena.bool_ty,
                             });
 
                             step_stmt = self.push_stmt(IrStmt::Assign {
@@ -296,8 +319,6 @@ impl LoweringBuilder {
                                 op: Some(syn::BinOp::Sub(Default::default())),
                             });
                         } else {
-                            // Init: let i = start
-
                             init_stmt = self.push_stmt(IrStmt::Let {
                                 var: loop_var_id,
                                 init: start,
@@ -312,6 +333,7 @@ impl LoweringBuilder {
                                 op: cond_op,
                                 left: loop_var_expr,
                                 right: end,
+                                ty: arena.bool_ty,
                             });
 
                             step_stmt = self.push_stmt(IrStmt::Assign {
@@ -321,8 +343,8 @@ impl LoweringBuilder {
                             });
                         }
 
-                        let body = self.lower_block(&for_loop.body)?;
-                        
+                        let body = self.lower_block(arena, &for_loop.body)?;
+
                         Ok(self.push_stmt(IrStmt::For {
                             init: Some(init_stmt),
                             cond: Some(cond_expr),
@@ -332,9 +354,9 @@ impl LoweringBuilder {
                     }
 
                     syn::Expr::While(while_expr) => {
-                        let cond_id = self.lower_expr(&while_expr.cond)?;
-                        let body = self.lower_block(&while_expr.body)?;
-                        
+                        let cond_id = self.lower_expr(arena, &while_expr.cond)?;
+                        let body = self.lower_block(arena, &while_expr.body)?;
+
                         Ok(self.push_stmt(IrStmt::While {
                             cond: cond_id,
                             body,
@@ -342,11 +364,11 @@ impl LoweringBuilder {
                     }
 
                     syn::Expr::Break(_) => Ok(self.push_stmt(IrStmt::Break)),
-        
+
                     syn::Expr::Continue(_) => Ok(self.push_stmt(IrStmt::Continue)),
 
                     _ => {
-                        let exprid = self.lower_expr(expr)?;
+                        let exprid = self.lower_expr(arena, expr)?;
                         Ok(self.push_stmt(IrStmt::Expr(exprid)))
                     }
                 }

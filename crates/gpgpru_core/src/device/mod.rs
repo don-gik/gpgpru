@@ -123,6 +123,11 @@ impl Device {
             .load(Ordering::Relaxed)
     }
 
+    #[inline]
+    pub fn next_task_index(&self) -> u16 {
+        self.shared.cmd_manager.task_queue.len()
+    }
+
     pub fn wait_timeline(&self, value: u64) -> Result<()> {
         if value == 0 {
             return Ok(());
@@ -322,7 +327,7 @@ impl Device {
 impl Drop for SharedContext {
     fn drop(&mut self) {
         unsafe {
-            let _ = self.cmd_manager.task_queue.drain_and_sort();
+            let _ = self.cmd_manager.task_queue.drain();
 
             if let Err(e) = self.core.logical_device.device_wait_idle() {
                 error!(error = ?e, "Failed to wait for device idle");

@@ -78,21 +78,28 @@ where
             device.get_pipeline(self.spirv_code, task.push_constants_size, self.entry_point)?;
 
         let target_epoch = device.pending_epoch();
+        let task_idx = device.next_task_index();
+
         task.target_epoch = target_epoch;
 
         let mut has_write = false;
-
         self.push_data.trace_hazards(&mut |bda, size, access| {
-            if let Some(hazard) =
-                device
-                    .shared
-                    .page_tracker
-                    .check_and_update(bda, size, access, target_epoch)
-            {
-                // dbg!(&hazard);
+            if let Some(hazard) = device.shared.page_tracker.check_and_update(
+                bda,
+                size,
+                access,
+                target_epoch,
+                task_idx,
+            ) {
                 task.hazards.need_barrier = true;
                 task.hazards.src_access |= hazard.src_access;
                 task.hazards.dst_access |= hazard.dst_access;
+
+                for &dep_idx in &hazard.deps {
+                    if !task.hazards.deps.contains(&dep_idx) {
+                        task.hazards.deps.push(dep_idx);
+                    }
+                }
             }
             if access == AccessType::Write {
                 has_write = true;
@@ -100,9 +107,6 @@ where
         });
 
         task.has_write = has_write;
-
-        // dbg!(&task.hazards);
-
         Ok(task.pipeline_id(pipeline_id))
     }
 

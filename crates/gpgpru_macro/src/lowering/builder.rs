@@ -1,10 +1,11 @@
 // src/lowering/builder.rs
 
 use crate::{
-    ExprId, GpuType, IrExpr, IrStmt, ParsedSignature, StmtId, VarId, VarInfo, VarStorage,
-    types::ToSlangString,
+    ExprId, GpuType, IrExpr, IrStmt, LiteralKind, ParsedSignature, StmtId, SystemBinding,
+    TypeArena, TypeIdx, VarId, VarInfo, VarStorage,
 };
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use proc_macro2::Span;
@@ -16,11 +17,11 @@ pub struct LoweringBuilder {
     pub vars: Vec<VarInfo>,
 
     // Temporary Stack
-    scopes: Vec<HashMap<String, VarId>>,
+    scopes: Vec<HashMap<Cow<'static, str>, VarId>>,
 }
 
 impl LoweringBuilder {
-    pub fn new(sig: &ParsedSignature) -> Self {
+    pub fn new(arena: &mut TypeArena, sig: &ParsedSignature) -> Self {
         let mut builder = Self {
             exprs: Vec::new(),
             stmts: Vec::new(),
@@ -34,20 +35,62 @@ impl LoweringBuilder {
                 VarStorage::Builtin {
                     ty: bind_target.clone(),
                 },
+                match bind_target {
+                    SystemBinding::GlobalId => arena.alloc(GpuType::Vector {
+                        element: LiteralKind::UInt32,
+                        len: 3,
+                    }),
+                    SystemBinding::GlobalIdX
+                    | SystemBinding::GlobalIdY
+                    | SystemBinding::GlobalIdZ => arena.alloc(GpuType::Scalar(LiteralKind::UInt32)),
+                },
             );
             builder.scopes[0].insert(arg_name.clone(), var_id);
         }
 
-        for (arg_name, gpu_type) in &sig.pushed_fields {
-            let storage = match gpu_type {
-                GpuType::Slice { element, .. } => VarStorage::Bda {
-                    elem_ty: element.to_slang_string(),
-                },
-                _ => VarStorage::PushConstant,
-            };
+        for (arg_name, type_idx) in &sig.pushed_fields {
+            let arg_name_str = arg_name.to_string();
+            let arg_name_cow: Cow<'static, str> = Cow::Owned(arg_name_str);
 
-            let var_id = builder.alloc_var(arg_name.clone(), storage);
-            builder.scopes[0].insert(arg_name.clone(), var_id);
+            match arena.get(*type_idx) {
+                GpuType::Slice { element, is_mut } => {
+                    let bda_id = builder.alloc_var(
+                        arg_name_cow.clone(),
+                        VarStorage::Bda { elem_ty: *element },
+                        *type_idx,
+                    );
+                    let ptr_name: Cow<'static, str> =
+                        Cow::Owned(format!("_gpu_{}_ptr", arg_name_cow.clone()));
+                    let ptr_id = builder.alloc_var(
+                        ptr_name.clone(),
+                        VarStorage::PushConstant,
+                        arena.alloc(GpuType::Ptr {
+                            target: *element,
+                            is_mut: *is_mut,
+                        }),
+                    );
+                    let len_name: Cow<'static, str> =
+                        Cow::Owned(format!("_gpu_{}_len", arg_name_cow.clone()));
+                    let len_id = builder.alloc_var(
+                        len_name.clone(),
+                        VarStorage::PushConstant,
+                        arena.alloc(GpuType::Scalar(LiteralKind::UInt32)),
+                    );
+
+                    builder.scopes[0].insert(arg_name_cow, bda_id);
+                    builder.scopes[0].insert(ptr_name, ptr_id);
+                    builder.scopes[0].insert(len_name, len_id);
+                }
+                _ => {
+                    let var_id = builder.alloc_var(
+                        arg_name_cow.clone(),
+                        VarStorage::PushConstant,
+                        *type_idx,
+                    );
+
+                    builder.scopes[0].insert(arg_name_cow, var_id);
+                }
+            };
         }
 
         builder
@@ -63,7 +106,12 @@ impl LoweringBuilder {
         result
     }
 
-    pub fn insert_scope(&mut self, name: String, var_id: VarId, span: Span) -> syn::Result<()> {
+    pub fn insert_scope(
+        &mut self,
+        name: Cow<'static, str>,
+        var_id: VarId,
+        span: Span,
+    ) -> syn::Result<()> {
         if let Some(current_scope) = self.scopes.last_mut() {
             current_scope.insert(name, var_id);
             return Ok(());
@@ -86,9 +134,9 @@ impl LoweringBuilder {
         id
     }
 
-    pub fn alloc_var(&mut self, name: String, kind: VarStorage) -> VarId {
+    pub fn alloc_var(&mut self, name: Cow<'static, str>, kind: VarStorage, ty: TypeIdx) -> VarId {
         let id = VarId(self.vars.len());
-        self.vars.push(VarInfo { name, kind });
+        self.vars.push(VarInfo { name, kind, ty });
         id
     }
 

@@ -1,15 +1,17 @@
 // src/ir/var.rs
 
-use crate::SystemBinding;
+use crate::{SystemBinding, TypeIdx};
 
-#[derive(Debug, PartialEq)]
+use std::borrow::Cow;
+
+#[derive(Debug, PartialEq, Clone, Eq)]
 pub enum VarStorage {
     /// let x = 0;
     Local,
     /// Arguments
     PushConstant,
     Bda {
-        elem_ty: String,
+        elem_ty: TypeIdx,
     },
     /// thread_idx
     Builtin {
@@ -21,6 +23,7 @@ pub enum VarStorage {
 
 #[derive(Debug)]
 pub struct VarInfo {
-    pub name: String,
+    pub name: Cow<'static, str>,
     pub kind: VarStorage,
+    pub ty: TypeIdx,
 }

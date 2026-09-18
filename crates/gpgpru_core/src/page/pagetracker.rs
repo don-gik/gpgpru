@@ -19,8 +19,6 @@ impl PageTracker {
             let l1_end_page = ((l1_index as u64 + 1) << L2_BITS) - 1;
             let chunk_end_page = end_page.min(l1_end_page);
 
-            // dbg!(start_page, end_page, l1_index, chunk_end_page);
-
             let slot = &self.directory[l1_index];
             let read_guard = slot.read();
 
@@ -59,19 +57,21 @@ impl PageTracker {
         size: u64,
         access: AccessType,
         current_epoch: u64,
+        current_index: u16,
     ) -> Option<HazardResult> {
         if size == 0 {
             return None;
         }
 
+        let encoded_epoch = (current_epoch << TASK_BITS) | (current_index as u64);
+
         let start_page = bda >> PAGE_SHIFT;
         let end_page = (bda + size - 1) >> PAGE_SHIFT;
-
-        // dbg!(bda, size, access, start_page, end_page);
 
         let mut raw_hazard = false;
         let mut war_hazard = false;
         let mut waw_hazard = false;
+        let mut accumulated_deps = SmallVec::<[u16; 4]>::new();
 
         let mut current_page = start_page;
 
@@ -80,25 +80,29 @@ impl PageTracker {
             let l1_end_page = ((l1_index as u64 + 1) << L2_BITS) - 1;
             let chunk_end_page = end_page.min(l1_end_page);
 
-            // dbg!(l1_index, l1_end_page, chunk_end_page);
-
             self.with_l2(l1_index, |l2_table| {
                 for page in current_page..=chunk_end_page {
                     let l2_index = (page & L2_MASK) as usize;
                     let page_meta = &l2_table.pages[l2_index];
 
-                    let (raw, war, waw) =
-                        page_meta.update(access == AccessType::Write, current_epoch);
+                    let (raw, war, waw, page_deps) =
+                        page_meta.update(access == AccessType::Write, encoded_epoch);
+
                     raw_hazard |= raw;
                     war_hazard |= war;
                     waw_hazard |= waw;
+                    for dep_idx in page_deps {
+                        if !accumulated_deps.contains(&dep_idx) {
+                            accumulated_deps.push(dep_idx);
+                        }
+                    }
                 }
             });
 
             current_page = chunk_end_page + 1;
         }
 
-        if raw_hazard || war_hazard || waw_hazard {
+        if raw_hazard || war_hazard || waw_hazard || !accumulated_deps.is_empty() {
             let mut src_access = AccessFlags2::empty();
             let mut dst_access = AccessFlags2::empty();
 
@@ -119,6 +123,7 @@ impl PageTracker {
                 need_barrier: true,
                 src_access,
                 dst_access,
+                deps: accumulated_deps,
             })
         } else {
             None
@@ -138,8 +143,6 @@ impl PageTracker {
         } else {
             0
         };
-
-        // dbg!(bda, page, l1_index, l2_index, epoch);
 
         epoch
     }

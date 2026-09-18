@@ -1,62 +1,60 @@
 // src/lowering/expr.rs
 
-use super::LoweringBuilder;
-use crate::{ExprId, IrExpr, LiteralKind};
+use super::{LoweringBuilder, resolve_call, resolve_field, resolve_method};
+use crate::{ExprId, GpuType, IrExpr, LiteralKind, MethodAction, TypeArena, VarStorage};
 
 use syn::spanned::Spanned;
 
-fn parse_lit_for_slang(lit: &syn::Lit) -> syn::Result<(String, &'static str)> {
-    match lit {
-        syn::Lit::Float(f) => {
-            let digits = f.base10_digits();
-            let slang_type = match f.suffix() {
-                "f64" => "double",
-                "f32" | "" => "float",
-                s => {
-                    return Err(syn::Error::new_spanned(
-                        f,
-                        format!("Unsupported float suffix: {}", s),
-                    ));
-                }
-            };
-            Ok((digits.to_string(), slang_type))
-        }
-        syn::Lit::Int(i) => {
-            let digits = i.base10_digits();
-            let slang_type = match i.suffix() {
-                "u32" | "usize" => "uint",
-                "u64" => "uint64_t",
-                "i64" => "int64_t",
-                "i32" | "" => "int",
-                s => {
-                    return Err(syn::Error::new_spanned(
-                        i,
-                        format!("Unsupported int suffix: {}", s),
-                    ));
-                }
-            };
-            Ok((digits.to_string(), slang_type))
-        }
-        syn::Lit::Bool(b) => Ok((b.value.to_string(), "bool")),
-        _ => Err(syn::Error::new_spanned(
-            lit,
-            "Unsupported literal for array initialization",
-        )),
-    }
-}
-
 impl LoweringBuilder {
-    pub fn lower_expr(&mut self, syn_expr: &syn::Expr) -> syn::Result<ExprId> {
+    pub fn lower_expr(
+        &mut self,
+        arena: &mut TypeArena,
+        syn_expr: &syn::Expr,
+    ) -> syn::Result<ExprId> {
         match syn_expr {
             syn::Expr::Lit(syn::ExprLit { lit, .. }) => {
-                let value = match lit {
-                    syn::Lit::Str(s) => format!("\"{}\"", s.value()),
-                    syn::Lit::Int(i) => i.base10_digits().to_string(),
-                    syn::Lit::Float(f) => f.base10_digits().to_string(),
-                    syn::Lit::Bool(b) => b.value.to_string(),
+                let (value, ty) = match lit {
+                    syn::Lit::Float(f) => {
+                        let value = f.base10_digits().to_string();
+                        let kind = match f.suffix() {
+                            "f32" | "" => LiteralKind::Float32,
+                            "f64" => LiteralKind::Float64,
+                            s => {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    format!("Unsupported float suffix: {}", s),
+                                ));
+                            }
+                        };
+                        (value, arena.alloc(GpuType::Scalar(kind)))
+                    }
+
+                    syn::Lit::Int(i) => {
+                        let value = i.base10_digits().to_string();
+                        let kind = match i.suffix() {
+                            "u32" => LiteralKind::UInt32,
+                            "u64" => LiteralKind::UInt64,
+                            "i32" | "" => LiteralKind::Int32,
+                            "i64" => LiteralKind::Int64,
+                            s => {
+                                return Err(syn::Error::new(
+                                    lit.span(),
+                                    format!("Unsupported int suffix: {}", s),
+                                ));
+                            }
+                        };
+                        (value, arena.alloc(GpuType::Scalar(kind)))
+                    }
+
+                    syn::Lit::Bool(b) => (
+                        b.value.to_string(),
+                        arena.alloc(GpuType::Scalar(LiteralKind::Bool)),
+                    ),
+
                     _ => return Err(syn::Error::new(lit.span(), "Unsupported Literal Type.")),
                 };
-                Ok(self.push_expr(IrExpr::Literal { value }))
+
+                Ok(self.push_expr(IrExpr::Literal { value, ty }))
             }
 
             syn::Expr::Path(path) => {
@@ -65,55 +63,132 @@ impl LoweringBuilder {
                     .get_ident()
                     .ok_or_else(|| syn::Error::new(path.span(), "Complex path not supported"))?;
                 let name = ident.to_string();
+
                 let var_id = self.lookup_var(&name, ident.span())?;
-                Ok(self.push_expr(IrExpr::Var(var_id)))
+                let var_ty = self.vars[var_id.0].ty;
+
+                Ok(self.push_expr(IrExpr::Var {
+                    id: var_id,
+                    ty: var_ty,
+                }))
             }
 
             syn::Expr::Binary(bin) => {
-                let lhs = self.lower_expr(&bin.left)?;
-                let rhs = self.lower_expr(&bin.right)?;
+                let lhs = self.lower_expr(arena, &bin.left)?;
+                let rhs = self.lower_expr(arena, &bin.right)?;
+
+                let ty = self.exprs[lhs.0].ty();
+
                 Ok(self.push_expr(IrExpr::Binary {
-                    op: bin.op,
                     left: lhs,
                     right: rhs,
+                    op: bin.op,
+                    ty,
                 }))
             }
 
             syn::Expr::Unary(un) => {
-                let expr = self.lower_expr(&un.expr)?;
+                let expr_id = self.lower_expr(arena, &un.expr)?;
+                let inner_ty = self.exprs[expr_id.0].ty();
+
+                let ty = match un.op {
+                    syn::UnOp::Neg(_) | syn::UnOp::Not(_) => inner_ty,
+
+                    syn::UnOp::Deref(token) => match arena.get(inner_ty) {
+                        GpuType::Slice { element, .. } => *element,
+                        _ => {
+                            return Err(syn::Error::new(
+                                token.spans[0],
+                                "Cannot dereference a non-buffer/slice type",
+                            ));
+                        }
+                    },
+
+                    _ => return Err(syn::Error::new(un.span(), "Unsupported unary operator")),
+                };
+
                 Ok(self.push_expr(IrExpr::Unary {
                     op: un.op,
-                    value: expr,
+                    value: expr_id,
+                    ty,
                 }))
             }
 
             syn::Expr::Index(idx) => {
-                let base = self.lower_expr(&idx.expr)?;
-                let index = self.lower_expr(&idx.index)?;
-                Ok(self.push_expr(IrExpr::Index { base, index }))
+                let mut base = self.lower_expr(arena, &idx.expr)?;
+                let index = self.lower_expr(arena, &idx.index)?;
+
+                if let IrExpr::Var { id: var_id, .. } = self.exprs[base.0] {
+                    let var_info = &self.vars[var_id.0];
+                    if matches!(var_info.kind, VarStorage::Bda { .. }) {
+                        let ptr_name = format!("_gpu_{}_ptr", var_info.name);
+                        let ptr_var_id = self.lookup_var(&ptr_name, idx.span())?;
+                        let ptr_ty = self.vars[ptr_var_id.0].ty;
+
+                        base = self.push_expr(IrExpr::Var {
+                            id: ptr_var_id,
+                            ty: ptr_ty,
+                        });
+                    }
+                }
+
+                let base_ty = self.exprs[base.0].ty();
+
+                let ty = match arena.get(base_ty) {
+                    GpuType::Ptr { target, .. } => *target,
+
+                    GpuType::Slice { element, .. } => *element,
+
+                    GpuType::Array { element, .. } => *element,
+
+                    GpuType::Vector { element, .. } => arena.alloc(GpuType::Scalar(*element)),
+
+                    GpuType::Matrix {
+                        rows,
+                        cols: _,
+                        element,
+                    } => arena.alloc(GpuType::Vector {
+                        element: *element,
+                        len: *rows,
+                    }),
+
+                    _ => {
+                        return Err(syn::Error::new(idx.span(), "Cannot index into this type"));
+                    }
+                };
+
+                Ok(self.push_expr(IrExpr::Index { base, index, ty }))
             }
 
             syn::Expr::Field(field) => {
-                let base = self.lower_expr(&field.base)?;
+                let base = self.lower_expr(arena, &field.base)?;
+
                 let field_name = match &field.member {
                     syn::Member::Named(ident) => ident.to_string(),
                     syn::Member::Unnamed(index) => index.index.to_string(),
                 };
-                Ok(self.push_expr(IrExpr::Field {
-                    base: base,
-                    name: field_name,
-                }))
+
+                let base_ty_id = self.exprs[base.0].ty();
+                let base_ty = arena.get(base_ty_id);
+
+                match resolve_field(base_ty, field_name.as_str()) {
+                    Some(ty) => Ok(self.push_expr(IrExpr::Field {
+                        base: base,
+                        name: field_name,
+                        ty: arena.alloc(ty),
+                    })),
+                    None => Err(syn::Error::new(field.span(), "Field definition not found.")),
+                }
             }
 
             syn::Expr::Call(call) => {
-                let name = match &*call.func {
+                let segments: Vec<String> = match &*call.func {
                     syn::Expr::Path(p) => p
                         .path
-                        .get_ident()
-                        .ok_or_else(|| {
-                            syn::Error::new(call.func.span(), "Complex function path not supported")
-                        })?
-                        .to_string(),
+                        .segments
+                        .iter()
+                        .map(|seg| seg.ident.to_string())
+                        .collect(),
                     _ => {
                         return Err(syn::Error::new(
                             call.func.span(),
@@ -121,35 +196,96 @@ impl LoweringBuilder {
                         ));
                     }
                 };
-                let args = call
-                    .args
-                    .iter()
-                    .map(|arg| self.lower_expr(arg))
-                    .collect::<syn::Result<Vec<_>>>()?;
-                Ok(self.push_expr(IrExpr::Call { name, args }))
+
+                let mut args = Vec::new();
+                let mut arg_types = Vec::new();
+
+                for arg in &call.args {
+                    let lowered_arg = self.lower_expr(arena, arg)?;
+                    args.push(lowered_arg);
+                    arg_types.push(arena.get(self.exprs[lowered_arg.0].ty()).clone());
+                }
+
+                match resolve_call(&segments, &arg_types) {
+                    Some((return_ty, emit_name)) => Ok(self.push_expr(IrExpr::Call {
+                        name: emit_name.to_string(),
+                        args,
+                        ty: arena.alloc(return_ty),
+                    })),
+                    None => Err(syn::Error::new(
+                        call.func.span(),
+                        format!("Function '{:?}' not found or invalid arguments.", segments),
+                    )),
+                }
             }
 
             syn::Expr::MethodCall(call) => {
-                let base = self.lower_expr(&call.receiver)?;
-                let name = call.method.to_string();
+                let receiver = self.lower_expr(arena, &call.receiver)?;
+                let receiver_ty = self.exprs[receiver.0].ty();
 
-                let args = call
-                    .args
-                    .iter()
-                    .map(|arg| self.lower_expr(arg))
-                    .collect::<syn::Result<Vec<_>>>()?;
+                let method_name = call.method.to_string();
 
-                Ok(self.push_expr(IrExpr::MethodCall { base, name, args }))
+                let mut args = Vec::new();
+                let mut arg_types = vec![arena.get(receiver_ty).clone()];
+                for arg in &call.args {
+                    let lowered_arg = self.lower_expr(arena, arg)?;
+                    args.push(lowered_arg);
+                    arg_types.push(arena.get(self.exprs[lowered_arg.0].ty()).clone());
+                }
+
+                match resolve_method(&method_name, &arg_types) {
+                    Some(MethodAction::AsFunction(return_ty, emit_name)) => {
+                        let mut func_args = vec![receiver];
+                        func_args.extend(args); // receiver
+
+                        Ok(self.push_expr(IrExpr::Call {
+                            name: emit_name.to_string(), // "dot", "normalize"
+                            args: func_args,
+                            ty: arena.alloc(return_ty),
+                        }))
+                    }
+
+                    Some(MethodAction::AsMethod(return_ty, emit_name)) => {
+                        Ok(self.push_expr(IrExpr::MethodCall {
+                            base: receiver,
+                            name: emit_name.to_string(), // "Sample", "Load"
+                            args,
+                            ty: arena.alloc(return_ty),
+                        }))
+                    }
+
+                    None => {
+                        if method_name == "len" && args.is_empty() {
+                            if let IrExpr::Var { id: var_id, .. } = self.exprs[receiver.0] {
+                                let var_info = &self.vars[var_id.0];
+
+                                if matches!(var_info.kind, VarStorage::Bda { .. }) {
+                                    let len_var_name = format!("_gpu_{}_len", var_info.name);
+                                    let len_var_id = self.lookup_var(&len_var_name, call.span())?;
+
+                                    return Ok(self.push_expr(IrExpr::Var {
+                                        id: len_var_id,
+                                        ty: arena.u32_ty,
+                                    }));
+                                }
+                            }
+                        }
+
+                        Err(syn::Error::new(
+                            call.span(),
+                            format!("Method '{:?}' not found or invalid arguments.", method_name),
+                        ))
+                    }
+                }
             }
 
             syn::Expr::Cast(cast) => {
                 let target_type = LiteralKind::try_from(&*cast.ty)?;
-                let expr_id = self.lower_expr(&cast.expr)?;
+                let expr_id = self.lower_expr(arena, &cast.expr)?;
 
-                Ok(self.push_expr(IrExpr::Cast {
-                    expr: expr_id,
-                    target_type,
-                }))
+                let ty = arena.alloc(GpuType::Scalar(target_type));
+
+                Ok(self.push_expr(IrExpr::Cast { expr: expr_id, ty }))
             }
 
             // [0.0; 3] -> "{ 0.0, 0.0, 0.0 }"
@@ -169,24 +305,22 @@ impl LoweringBuilder {
                     }
                 };
 
-                let (lit_val, slang_type) = match &*e.expr {
-                    syn::Expr::Lit(syn::ExprLit { lit, .. }) => parse_lit_for_slang(lit)?,
-                    _ => {
-                        return Err(syn::Error::new_spanned(
-                            &e.expr,
-                            "Array repeat value must be a literal",
-                        ));
-                    }
-                };
+                let value_id = self.lower_expr(arena, &e.expr)?;
+                let element_ty = self.exprs[value_id.0].ty();
 
-                let elements = vec![lit_val.as_str(); count].join(", ");
+                let array_ty = arena.alloc(GpuType::Array {
+                    element: element_ty,
+                    len: count,
+                });
 
-                Ok(self.push_expr(IrExpr::Literal {
-                    value: format!("{}[{}]({})", slang_type, count, elements),
+                Ok(self.push_expr(IrExpr::Repeat {
+                    value: value_id,
+                    count,
+                    ty: array_ty,
                 }))
             }
 
-            syn::Expr::Paren(paren) => self.lower_expr(&paren.expr),
+            syn::Expr::Paren(paren) => self.lower_expr(arena, &paren.expr),
 
             _ => Err(syn::Error::new(
                 syn_expr.span(),

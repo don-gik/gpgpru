@@ -193,9 +193,8 @@ fn read_buffer_internal<T: Copy, Loc: LocationInfo>(
         .shared
         .page_tracker
         .get_last_write_epoch(buffer.base_device_address());
-    // dbg!(last_written_epoch);
 
-    let wait_info = ash::vk::SemaphoreWaitInfo::default()
+    let wait_info = vk::SemaphoreWaitInfo::default()
         .semaphores(std::slice::from_ref(
             &device.shared.cmd_manager.timeline_semaphore,
         ))

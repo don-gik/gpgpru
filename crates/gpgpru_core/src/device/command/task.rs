@@ -1,10 +1,12 @@
 // src/device/command/task.rs
 
-use ash::vk::AccessFlags2;
-
 use crate::__private::HazardTrace;
 use crate::page::HazardResult;
 
+use ash::vk::AccessFlags2;
+use smallvec::SmallVec;
+
+#[derive(Debug)]
 pub struct Task {
     /// PipelineManager uses this hash.
     pub(crate) pipeline_id: u64,
@@ -46,6 +48,7 @@ impl Task {
                 need_barrier: false,
                 src_access: AccessFlags2::empty(),
                 dst_access: AccessFlags2::empty(),
+                deps: SmallVec::<[u16; 4]>::new(),
             },
             has_write: true,
         }

@@ -10,7 +10,7 @@ fn scale(data: &mut [f32], factor: f32, global_id_x: GlobalIdX) {
         data[idx] *= factor;
     }
 
-    let stuff = [0.0; 3];
+    // let stuff = [0.0; 3];
 }
 
 fn main() -> Result<()> {

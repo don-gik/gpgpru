@@ -27,7 +27,6 @@ impl AllocationManager {
         self.allocated_bytes.fetch_add(size, Ordering::Relaxed);
         self.allocation_count.fetch_add(1, Ordering::Relaxed);
 
-        // dbg!(desc.name, size, total, "Buffer allocated");
         Ok(allocation)
     }
 

@@ -29,7 +29,7 @@ pub fn compile_slang(
 ) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
     let metadata = cargo_metadata::MetadataCommand::new().exec()?;
     let target_dir = metadata.target_directory;
-    let target_cache_dir = target_dir.join("gpgpru");
+    let target_cache_dir = target_dir.join("gpgpru/shaders");
 
     std::fs::create_dir_all(&target_cache_dir)?;
 

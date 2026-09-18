@@ -39,19 +39,21 @@ fn main() -> Result<()> {
     // ------------------------------------------------------------------------
 
     // Step 1: BufA Fill 3.0
-    fill(&mut buf_a, 3.0).with(&device, (group_count, 1, 1))?;
+    fill(&mut buf_a, 3.0).queue(&device, (group_count, 1, 1))?;
 
     // Step 2: BufA -> BufB (Read BufA, Write BufB = 12.0)
-    multiply_copy(&buf_a, &mut buf_b, 4.0).with(&device, (group_count, 1, 1))?;
+    multiply_copy(&buf_a, &mut buf_b, 4.0).queue(&device, (group_count, 1, 1))?;
 
     // Step 3: BufA Fill 100.0 (Write BufA = 100.0)
-    fill(&mut buf_a, 100.0).with(&device, (group_count, 1, 1))?;
+    fill(&mut buf_a, 100.0).queue(&device, (group_count, 1, 1))?;
 
     // Step 4: BufB -> BufC (Read BufB, Write BufC = 24.0)
-    multiply_copy(&buf_b, &mut buf_c, 2.0).with(&device, (group_count, 1, 1))?;
+    multiply_copy(&buf_b, &mut buf_c, 2.0).queue(&device, (group_count, 1, 1))?;
 
     // Step 5: BufB -> 500.0 (Write BufB = 500.0)
-    fill(&mut buf_b, 500.0).with(&device, (group_count, 1, 1))?;
+    fill(&mut buf_b, 500.0).queue(&device, (group_count, 1, 1))?;
+
+    device.dispatch()?;
 
     // ------------------------------------------------------------------------
     // Verification

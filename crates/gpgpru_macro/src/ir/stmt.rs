@@ -1,7 +1,7 @@
 // src/ir/stmt.rs
 
 use super::{ExprId, StmtId, VarId};
-use crate::GpuType;
+use crate::TypeIdx;
 
 #[derive(Debug, Clone)]
 pub struct IrBlock {
@@ -46,7 +46,7 @@ pub enum IrStmt {
 
     Const {
         var: VarId,
-        ty: GpuType,
+        ty: TypeIdx,
         init: ExprId,
     },
 

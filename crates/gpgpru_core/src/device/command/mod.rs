@@ -23,7 +23,8 @@ use ash::vk::{
     CommandBufferLevel, CommandBufferSubmitInfo, CommandBufferUsageFlags, CommandPool,
     CommandPoolCreateFlags, CommandPoolCreateInfo, DependencyInfo, Fence, MemoryBarrier2,
     PipelineBindPoint, PipelineLayout, PipelineStageFlags2, Semaphore, SemaphoreCreateInfo,
-    SemaphoreSubmitInfo, SemaphoreType, SemaphoreTypeCreateInfo, ShaderStageFlags, SubmitInfo2,
+    SemaphoreSubmitInfo, SemaphoreType, SemaphoreTypeCreateInfo, SemaphoreWaitInfo,
+    ShaderStageFlags, SubmitInfo2,
 };
 
 // use parking_lot::Mutex;
@@ -103,33 +104,6 @@ impl CommandManager {
         self.task_queue.push_task(task);
     }
 
-    fn record_task_barriers(&self, cmd_buffer: ash::vk::CommandBuffer, task: &Task) {
-        if !task.hazards.need_barrier {
-            return;
-        }
-
-        let src_stage = if task.hazards.src_access.is_empty() {
-            PipelineStageFlags2::TOP_OF_PIPE
-        } else {
-            PipelineStageFlags2::COMPUTE_SHADER
-        };
-
-        let memory_barrier = MemoryBarrier2::default()
-            .src_stage_mask(src_stage)
-            .src_access_mask(task.hazards.src_access)
-            .dst_stage_mask(PipelineStageFlags2::COMPUTE_SHADER)
-            .dst_access_mask(task.hazards.dst_access);
-
-        let dependency_info =
-            DependencyInfo::default().memory_barriers(std::slice::from_ref(&memory_barrier));
-
-        unsafe {
-            self.core
-                .logical_device
-                .cmd_pipeline_barrier2(cmd_buffer, &dependency_info);
-        }
-    }
-
     fn record_post_task_barriers(&self, cmd_buffer: ash::vk::CommandBuffer, task: &Task) {
         if task.has_write {
             let post_barrier = MemoryBarrier2::default()
@@ -165,16 +139,18 @@ impl CommandManager {
             current_value,
         );
 
-        let tasks = self.task_queue.drain_and_sort();
-        if tasks.is_empty() {
+        let batches = self.task_queue.drain_sort_and_coalesce();
+        if batches.is_empty() {
             return Ok(current_value);
         }
+
+        // dbg!(&batches);
 
         let frame_slot = (current_value as usize) % MAX_FRAMES_IN_FLIGHT;
         let cmd_buffer = self.cmd_buffers[frame_slot];
         if current_value >= MAX_FRAMES_IN_FLIGHT as u64 {
             let wait_value = current_value - (MAX_FRAMES_IN_FLIGHT as u64) + 1;
-            let wait_info = ash::vk::SemaphoreWaitInfo::default()
+            let wait_info = SemaphoreWaitInfo::default()
                 .semaphores(std::slice::from_ref(&self.timeline_semaphore))
                 .values(std::slice::from_ref(&wait_value));
             unsafe {
@@ -202,13 +178,27 @@ impl CommandManager {
         let mut current_pipeline_id: Option<u64> = None;
         let mut current_layout: PipelineLayout = PipelineLayout::null();
 
-        for task in tasks {
-            self.record_task_barriers(cmd_buffer, &task);
+        for batch in batches {
+            if batch.need_barrier {
+                let memory_barrier = ash::vk::MemoryBarrier2::default()
+                    .src_stage_mask(ash::vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(batch.src_access)
+                    .dst_stage_mask(ash::vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .dst_access_mask(batch.dst_access);
 
-            // Pipeline Binding
-            if current_pipeline_id != Some(task.pipeline_id) {
+                let dependency_info = ash::vk::DependencyInfo::default()
+                    .memory_barriers(std::slice::from_ref(&memory_barrier));
+
+                unsafe {
+                    self.core
+                        .logical_device
+                        .cmd_pipeline_barrier2(cmd_buffer, &dependency_info);
+                }
+            }
+
+            if current_pipeline_id != Some(batch.pipeline_id) {
                 let pipeline_info = pipeline_manager
-                    .get(task.pipeline_id)
+                    .get(batch.pipeline_id)
                     .ok_or(GpuError::InvalidComputeTask)?;
 
                 unsafe {
@@ -218,32 +208,34 @@ impl CommandManager {
                         pipeline_info.0,
                     );
                 }
-                current_pipeline_id = Some(task.pipeline_id);
+                current_pipeline_id = Some(batch.pipeline_id);
                 current_layout = pipeline_info.1;
             }
 
-            if task.push_constants_size > 0 {
+            for task in &batch.tasks {
+                if task.push_constants_size > 0 {
+                    unsafe {
+                        self.core.logical_device.cmd_push_constants(
+                            cmd_buffer,
+                            current_layout,
+                            ShaderStageFlags::COMPUTE,
+                            0,
+                            &task.push_constants[..task.push_constants_size as usize],
+                        );
+                    }
+                }
+
                 unsafe {
-                    self.core.logical_device.cmd_push_constants(
+                    self.core.logical_device.cmd_dispatch(
                         cmd_buffer,
-                        current_layout,
-                        ShaderStageFlags::COMPUTE,
-                        0, // offset
-                        &task.push_constants[..task.push_constants_size as usize],
+                        task.dispatch_size.0,
+                        task.dispatch_size.1,
+                        task.dispatch_size.2,
                     );
                 }
-            }
 
-            unsafe {
-                self.core.logical_device.cmd_dispatch(
-                    cmd_buffer,
-                    task.dispatch_size.0,
-                    task.dispatch_size.1,
-                    task.dispatch_size.2,
-                );
+                self.record_post_task_barriers(cmd_buffer, &task);
             }
-
-            self.record_post_task_barriers(cmd_buffer, &task);
         }
 
         unsafe {
