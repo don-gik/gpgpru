@@ -3,6 +3,7 @@ name = "gpgpru_macro"
 edition.workspace = true
 version.workspace = true
 description = "Macros for gpgpru"
+license.workspace = true
 
 [lib]
 proc-macro = true

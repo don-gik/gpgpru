@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let cpp_source_dir = manifest_dir.join("../../shadertool-cpp");
+    let cpp_source_dir = manifest_dir.join("shadertool-cpp");
 
     // 1. Configure CMake build with PIC enabled for proc-macro loading
     let mut config = cmake::Config::new(&cpp_source_dir);

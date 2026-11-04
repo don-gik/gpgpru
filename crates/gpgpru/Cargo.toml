@@ -3,8 +3,9 @@ name = "gpgpru"
 edition.workspace = true
 version.workspace = true
 description = "Rust GPU framework"
+license.workspace = true
 
 [dependencies]
 bytemuck = "1.25.2"
-gpgpru_core = { path = "../gpgpru_core" }
-gpgpru_macro = { path = "../gpgpru_macro" }
+gpgpru_core.workspace = true
+gpgpru_macro.workspace = true

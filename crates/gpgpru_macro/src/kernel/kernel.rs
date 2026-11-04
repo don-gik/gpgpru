@@ -380,7 +380,7 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
 
                 // bytemuck Zero-Copy
                 param_copies.push(quote::quote! {
-                    let scalar_bytes = ::bytemuck::bytes_of(&#arg_name);
+                    let scalar_bytes = gpgpru::bytemuck::bytes_of(&#arg_name);
                     let end = #offset + scalar_bytes.len();
                     ___push_constant_bytes[#offset..end].copy_from_slice(scalar_bytes);
                 });
