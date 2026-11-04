@@ -1,5 +1,3 @@
-// src/page/traits.rs
-
 use super::*;
 
 pub trait HazardTrace {

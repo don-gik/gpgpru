@@ -1,5 +1,3 @@
-// src/device/allocator/allocator.rs
-
 use super::AllocationManager;
 use crate::{AllocDesc, Result};
 
@@ -12,8 +10,8 @@ impl AllocationManager {
     pub(crate) fn allocate(&self, desc: AllocDesc) -> Result<Allocation> {
         let mut allocator = self.inner.lock();
 
-        let mut requirements = desc.requirements;
-        requirements.alignment = requirements.alignment.max(4096);
+        let requirements = desc.requirements;
+        // requirements.alignment = requirements.alignment.max(4096);
 
         let allocation = allocator.allocate(&AllocationCreateDesc {
             name: desc.name,

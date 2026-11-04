@@ -1,5 +1,3 @@
-// src/buffer/linear/trash.rs
-
 use crate::Dispose;
 use crate::device::AllocationManager;
 use crate::page::PageTracker;

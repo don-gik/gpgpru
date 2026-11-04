@@ -1,16 +1,12 @@
-// src/device/pipeline/mod.rs
-
 mod dispatch;
 
-use super::VulkanCore;
+use super::*;
 
-use dashmap::DashMap;
-use std::sync::Arc;
-
-use ash::vk::{Pipeline, PipelineLayout};
+use std::ffi::CString;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub(crate) struct PipelineManager {
-    pipelines: DashMap<u64, (Pipeline, PipelineLayout)>,
+    pipelines: DashMap<u64, (vk::Pipeline, vk::PipelineLayout)>,
     core: Arc<VulkanCore>,
 }
 
@@ -22,7 +18,7 @@ impl PipelineManager {
         }
     }
 
-    pub(crate) fn get(&self, id: u64) -> Option<(Pipeline, PipelineLayout)> {
+    pub(crate) fn get(&self, id: u64) -> Option<(vk::Pipeline, vk::PipelineLayout)> {
         self.pipelines.get(&id).map(|entry| *entry.value())
     }
 

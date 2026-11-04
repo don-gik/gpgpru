@@ -5,5 +5,6 @@ version.workspace = true
 description = "Rust GPU framework"
 
 [dependencies]
+bytemuck = "1.25.2"
 gpgpru_core = { path = "../gpgpru_core" }
 gpgpru_macro = { path = "../gpgpru_macro" }

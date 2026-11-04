@@ -1,0 +1,3 @@
+[submodule "native"]
+	path = shadertool-cpp
+	url = https://github.com/don-gik/shadertool-cpp

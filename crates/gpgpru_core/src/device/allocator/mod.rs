@@ -1,19 +1,9 @@
-// src/device/allocator/mod.rs
-
 mod allocator;
 
-use super::VulkanCore;
-use crate::Result;
-
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-use ash::vk::MemoryRequirements;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
-use parking_lot::Mutex;
 
-use tracing::warn;
+use super::*;
 
 /// Descriptor that contains Allocation information.
 #[derive(Debug, Clone)]
@@ -21,14 +11,14 @@ pub struct AllocDesc<'a> {
     /// Name for profiling
     pub(crate) name: &'a str,
     /// Memory Requirements
-    pub(crate) requirements: MemoryRequirements,
+    pub(crate) requirements: vk::MemoryRequirements,
     /// Memory location
     pub(crate) location: MemoryLocation,
 }
 
 impl<'a> AllocDesc<'a> {
     /// Allocation on VRAM
-    pub(crate) fn gpu_only(name: &'a str, requirements: MemoryRequirements) -> Self {
+    pub(crate) fn gpu_only(name: &'a str, requirements: vk::MemoryRequirements) -> Self {
         Self {
             name,
             requirements,
@@ -37,7 +27,7 @@ impl<'a> AllocDesc<'a> {
     }
 
     /// Allocation on Cpu -> Gpu (HostVisible)
-    pub(crate) fn cpu_to_gpu(name: &'a str, requirements: MemoryRequirements) -> Self {
+    pub(crate) fn cpu_to_gpu(name: &'a str, requirements: vk::MemoryRequirements) -> Self {
         Self {
             name,
             requirements,
@@ -46,7 +36,7 @@ impl<'a> AllocDesc<'a> {
     }
 
     /// Allocation on Gpu -> Cpu
-    pub(crate) fn gpu_to_cpu(name: &'a str, requirements: MemoryRequirements) -> Self {
+    pub(crate) fn gpu_to_cpu(name: &'a str, requirements: vk::MemoryRequirements) -> Self {
         Self {
             name,
             requirements,
@@ -55,7 +45,7 @@ impl<'a> AllocDesc<'a> {
     }
 
     /// Allocation on Shared
-    pub(crate) fn shared(name: &'a str, requirements: MemoryRequirements) -> Self {
+    pub(crate) fn shared(name: &'a str, requirements: vk::MemoryRequirements) -> Self {
         Self {
             name,
             requirements,
@@ -125,7 +115,8 @@ impl Drop for AllocationManager {
         let remaining_count = self.allocation_count.load(Ordering::Relaxed);
 
         if remaining_bytes > 0 || remaining_count > 0 {
-            warn!(
+            tracing::warn!(
+                target = "gpgpru",
                 bytes = remaining_bytes,
                 count = remaining_count,
                 "GPU memory leak detected on AllocationManager drop"

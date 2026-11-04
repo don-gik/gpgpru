@@ -1,17 +1,18 @@
-// src/device/command/queue.rs
+use super::*;
 
-use super::Task;
-use ash::vk::AccessFlags2;
-use crossbeam_queue::SegQueue;
-use smallvec::{SmallVec, smallvec};
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum BatchKind {
+    Compute(u64),
+    Transfer,
+}
 
 #[derive(Debug)]
 pub(crate) struct TaskBatch {
-    pub(crate) pipeline_id: u64,
+    pub(crate) kind: BatchKind,
     pub(crate) need_barrier: bool,
-    pub(crate) src_access: AccessFlags2,
-    pub(crate) dst_access: AccessFlags2,
-    pub(crate) tasks: SmallVec<[Task; 8]>,
+    pub(crate) src_access: vk::AccessFlags2,
+    pub(crate) dst_access: vk::AccessFlags2,
+    pub(crate) tasks: SmallVec<[Task; 16]>,
 }
 
 pub(crate) struct TaskQueue {
@@ -31,6 +32,7 @@ impl TaskQueue {
     }
 
     pub(crate) fn push_task(&self, task: Task) {
+        // dbg!(&task);
         let _ = self.queue.push(task);
     }
 
@@ -53,8 +55,9 @@ impl TaskQueue {
 
         if n == 1 {
             let task = tasks.pop().unwrap();
+            let kind = task.kind();
             return vec![TaskBatch {
-                pipeline_id: task.pipeline_id,
+                kind,
                 need_barrier: task.hazards.need_barrier,
                 src_access: task.hazards.src_access,
                 dst_access: task.hazards.dst_access,
@@ -104,14 +107,17 @@ impl TaskQueue {
             let ready_pos = current_pipeline.and_then(|pipe| {
                 ready
                     .iter()
-                    .position(|&idx| tasks[idx as usize].pipeline_id == pipe)
+                    .position(|&idx| tasks[idx as usize].kind() == BatchKind::Compute(pipe))
             });
 
             let next_idx = match ready_pos {
                 Some(pos) => ready.swap_remove(pos),
                 None => {
                     let idx = ready.swap_remove(0);
-                    current_pipeline = Some(tasks[idx as usize].pipeline_id);
+                    match tasks[idx as usize].kind() {
+                        BatchKind::Compute(pipe) => current_pipeline = Some(pipe),
+                        BatchKind::Transfer => current_pipeline = None,
+                    }
                     idx
                 }
             } as usize;
@@ -144,16 +150,17 @@ impl TaskQueue {
 
         // 4. Barrier Coalescing Pass
         let mut batches: Vec<TaskBatch> = Vec::with_capacity(n);
-        let mut current_batch_indices: SmallVec<[u16; 8]> = SmallVec::new();
+        let mut current_batch_indices: SmallVec<[u16; 16]> = SmallVec::new();
 
         // Wrap tasks in Option for fast ownership transfer without clone/permute
         let mut task_options: Vec<Option<Task>> = tasks.into_iter().map(Some).collect();
 
         for &orig_idx in &sorted_indices {
             let task = task_options[orig_idx].take().unwrap();
+            let task_kind = task.kind();
 
             let can_merge = batches.last().map_or(false, |last_batch| {
-                last_batch.pipeline_id == task.pipeline_id
+                last_batch.kind == task_kind
                     && !task
                         .hazards
                         .deps
@@ -172,7 +179,7 @@ impl TaskQueue {
                 current_batch_indices.clear();
                 current_batch_indices.push(orig_idx as u16);
                 batches.push(TaskBatch {
-                    pipeline_id: task.pipeline_id,
+                    kind: task_kind,
                     need_barrier: task.hazards.need_barrier,
                     src_access: task.hazards.src_access,
                     dst_access: task.hazards.dst_access,

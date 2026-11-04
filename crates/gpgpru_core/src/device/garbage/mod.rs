@@ -1,18 +1,15 @@
-// src/device/garbage/mod.rs
-
 mod manager;
 
+use super::*;
 use crate::buffer::linear::BufferTrash;
-use crate::device::AllocationManager;
-use crate::page::PageTracker;
-
-use ash::Device;
-
-use crossbeam_queue::SegQueue;
-use parking_lot::Mutex;
 
 pub(crate) trait Dispose {
-    fn dispose(self, device: &Device, allocator: &AllocationManager, page_tracker: &PageTracker);
+    fn dispose(
+        self,
+        device: &LogicalDevice,
+        allocator: &AllocationManager,
+        page_tracker: &PageTracker,
+    );
 }
 
 pub(crate) enum Collectable {
@@ -23,7 +20,7 @@ impl Collectable {
     #[inline(always)]
     pub(crate) fn dispose(
         self,
-        device: &Device,
+        device: &LogicalDevice,
         allocator: &AllocationManager,
         page_tracker: &PageTracker,
     ) {

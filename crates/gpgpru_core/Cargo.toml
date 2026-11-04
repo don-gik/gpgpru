@@ -7,6 +7,7 @@ description = "Core lib for gpgpru"
 [dependencies]
 ash = { workspace = true }
 bytemuck = "1.25.2"
+crossbeam-channel = "0.5.17"
 crossbeam-queue = "0.3.13"
 dashmap = "6.2.1"
 glam = "0.33.6"

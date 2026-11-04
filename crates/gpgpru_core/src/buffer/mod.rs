@@ -1,62 +1,63 @@
-// src/buffer/mod.rs
-
-pub mod bda;
 pub mod linear;
 
-use crate::AllocDesc;
-use bda::Bda;
+use super::*;
 
-use ash::vk::{Buffer, MemoryRequirements};
+// pub use MemoryLocation::*;
 
-pub struct GpuOnly;
-pub struct CpuToGpu;
-pub struct GpuToCpu;
-pub struct Shared;
-
-pub trait AsGpuBuffer<T> {
-    fn base_device_address(&self) -> u64;
-    fn vk_buffer(&self) -> Buffer;
-    fn offset(&self) -> u64;
-    fn size(&self) -> u64;
-    #[inline]
-    fn device_address(&self) -> u64 {
-        self.base_device_address() + self.offset()
-    }
-    fn bda(&self) -> Bda<T> {
-        Bda::new(self.device_address())
-    }
-    fn is_host_visible(&self) -> bool;
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryLocation {
+    GpuOnly = 0,
+    CpuToGpu = 1,
+    GpuToCpu = 2,
+    Shared = 3,
 }
 
-pub trait LocationInfo {
-    const IS_HOST_VISIBLE: bool;
-    fn allocation_desc<'a>(name: &'a str, requirements: MemoryRequirements) -> AllocDesc<'a>;
-}
-
-impl LocationInfo for GpuOnly {
-    const IS_HOST_VISIBLE: bool = false;
-    fn allocation_desc<'a>(name: &'a str, requirements: MemoryRequirements) -> AllocDesc<'a> {
-        AllocDesc::gpu_only(name, requirements)
+impl MemoryLocation {
+    #[inline(always)]
+    pub const fn from_u8(val: u8) -> Self {
+        match val {
+            0 => Self::GpuOnly,
+            1 => Self::CpuToGpu,
+            2 => Self::GpuToCpu,
+            _ => Self::Shared,
+        }
     }
-}
 
-impl LocationInfo for CpuToGpu {
-    const IS_HOST_VISIBLE: bool = true;
-    fn allocation_desc<'a>(name: &'a str, requirements: MemoryRequirements) -> AllocDesc<'a> {
-        AllocDesc::cpu_to_gpu(name, requirements)
+    #[inline(always)]
+    pub const fn is_cpu_writable(self) -> bool {
+        matches!(self, Self::CpuToGpu | Self::Shared)
     }
-}
 
-impl LocationInfo for GpuToCpu {
-    const IS_HOST_VISIBLE: bool = true;
-    fn allocation_desc<'a>(name: &'a str, requirements: MemoryRequirements) -> AllocDesc<'a> {
-        AllocDesc::gpu_to_cpu(name, requirements)
+    pub fn allocation_desc<'a>(
+        &self,
+        name: &'a str,
+        requirements: vk::MemoryRequirements,
+    ) -> AllocDesc<'a> {
+        match self {
+            MemoryLocation::CpuToGpu => AllocDesc::cpu_to_gpu(name, requirements),
+            MemoryLocation::GpuOnly => AllocDesc::gpu_only(name, requirements),
+            MemoryLocation::GpuToCpu => AllocDesc::gpu_to_cpu(name, requirements),
+            MemoryLocation::Shared => AllocDesc::shared(name, requirements),
+        }
     }
 }
 
-impl LocationInfo for Shared {
-    const IS_HOST_VISIBLE: bool = true;
-    fn allocation_desc<'a>(name: &'a str, requirements: MemoryRequirements) -> AllocDesc<'a> {
-        AllocDesc::shared(name, requirements)
+pub struct LocationTag<const LOC: u8>;
+
+impl<const LOC: u8> LocationTag<LOC> {
+    pub const VALUE: u8 = LOC;
+
+    pub const fn to_u8(self) -> u8 {
+        LOC
     }
 }
+
+#[allow(non_upper_case_globals)]
+pub const GpuOnly: LocationTag<{ MemoryLocation::GpuOnly as u8 }> = LocationTag;
+#[allow(non_upper_case_globals)]
+pub const CpuToGpu: LocationTag<{ MemoryLocation::CpuToGpu as u8 }> = LocationTag;
+#[allow(non_upper_case_globals)]
+pub const Shared: LocationTag<{ MemoryLocation::Shared as u8 }> = LocationTag;
+#[allow(non_upper_case_globals)]
+pub const GpuToCpu: LocationTag<{ MemoryLocation::GpuToCpu as u8 }> = LocationTag;

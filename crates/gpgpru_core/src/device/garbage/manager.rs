@@ -1,5 +1,3 @@
-// src/device/garbage/manager.rs
-
 use super::{Collectable, GarbageManager, Zombie};
 use crate::device::AllocationManager;
 use crate::page::PageTracker;
@@ -33,6 +31,10 @@ impl GarbageManager {
 
         while let Some(zombie) = self.pending.pop() {
             active.push(zombie);
+        }
+
+        if active.is_empty() {
+            return;
         }
 
         active.retain_mut(|zombie| {

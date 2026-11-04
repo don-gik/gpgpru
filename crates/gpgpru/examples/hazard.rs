@@ -1,22 +1,19 @@
 // examples/hazard.rs
 
 use gpgpru::prelude::*;
-use gpgpru::{Device, Result, compute, create_buffer, read_buffer};
+use gpgpru::{Device, GpuSlice, Result, create_buffer, kernel, read_buffer};
 
-#[compute(threads(256, 1, 1))]
-fn fill(data: &mut [f32], val: f32, global_id_x: GlobalIdX) {
-    let idx = global_id_x;
-    if idx < data.len() {
-        data[idx] = val;
-    }
-}
+#[kernel("examples/hazard.slang", "fill")]
+pub fn fill(data: &mut GpuSlice<f32>, data_len: u32, val: f32) {}
 
-#[compute(threads(256, 1, 1))]
-fn multiply_copy(src: &[f32], dst: &mut [f32], multiplier: f32, global_id_x: GlobalIdX) {
-    let idx = global_id_x;
-    if idx < src.len() && idx < dst.len() {
-        dst[idx] = src[idx] * multiplier;
-    }
+#[kernel("examples/hazard2.slang", "multiply_copy")]
+pub fn multiply_copy(
+    src: &GpuSlice<f32>,
+    src_len: u32,
+    dst: &mut GpuSlice<f32>,
+    dst_len: u32,
+    multiplier: f32,
+) {
 }
 
 fn main() -> Result<()> {
@@ -38,20 +35,26 @@ fn main() -> Result<()> {
     // Dispatch Pipeline
     // ------------------------------------------------------------------------
 
+    let buf_a_size = buf_a.size() as u32;
+    let buf_b_size = buf_b.size() as u32;
+    let buf_c_size = buf_c.size() as u32;
+
     // Step 1: BufA Fill 3.0
-    fill(&mut buf_a, 3.0).queue(&device, (group_count, 1, 1))?;
+    fill(&mut buf_a, buf_a_size, 3.0).queue(&device, (group_count, 1, 1))?;
 
     // Step 2: BufA -> BufB (Read BufA, Write BufB = 12.0)
-    multiply_copy(&buf_a, &mut buf_b, 4.0).queue(&device, (group_count, 1, 1))?;
+    multiply_copy(&buf_a, buf_a_size, &mut buf_b, buf_b_size, 4.0)
+        .queue(&device, (group_count, 1, 1))?;
 
     // Step 3: BufA Fill 100.0 (Write BufA = 100.0)
-    fill(&mut buf_a, 100.0).queue(&device, (group_count, 1, 1))?;
+    fill(&mut buf_a, buf_a_size, 100.0).queue(&device, (group_count, 1, 1))?;
 
     // Step 4: BufB -> BufC (Read BufB, Write BufC = 24.0)
-    multiply_copy(&buf_b, &mut buf_c, 2.0).queue(&device, (group_count, 1, 1))?;
+    multiply_copy(&buf_b, buf_b_size, &mut buf_c, buf_c_size, 2.0)
+        .queue(&device, (group_count, 1, 1))?;
 
     // Step 5: BufB -> 500.0 (Write BufB = 500.0)
-    fill(&mut buf_b, 500.0).queue(&device, (group_count, 1, 1))?;
+    fill(&mut buf_b, buf_b_size as u32, 500.0).queue(&device, (group_count, 1, 1))?;
 
     device.dispatch()?;
 

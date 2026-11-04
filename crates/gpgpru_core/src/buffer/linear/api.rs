@@ -1,12 +1,9 @@
-// src/buffer/linear/api.rs
-
-use super::{AsGpuBuffer, GpuOnly, LocationInfo};
-use crate::Result;
-use crate::{Device, GpuBuffer};
-
-use ash::vk;
-
+use super::*;
 use std::marker::PhantomData;
+
+// ----------------------------------------------------------------
+// Buffer Source & Init
+// ----------------------------------------------------------------
 
 pub enum BufferSource<'a, T> {
     Data(&'a [T]),
@@ -16,17 +13,6 @@ pub enum BufferSource<'a, T> {
 pub trait BufferInit<'a, T> {
     fn into_source(self) -> BufferSource<'a, T>;
 }
-
-/// Builder thingy for `GpuBuffer`.
-pub struct BufferBuilder<'a, T, Loc = GpuOnly> {
-    source: BufferSource<'a, T>,
-    name: &'a str,
-    _marker: PhantomData<Loc>,
-}
-
-// ----------------------------------------------------------------
-// Buffer Source Impl
-// ----------------------------------------------------------------
 
 impl<'a, T> BufferInit<'a, T> for usize {
     fn into_source(self) -> BufferSource<'a, T> {
@@ -47,10 +33,22 @@ impl<'a, T> BufferInit<'a, T> for &'a Vec<T> {
 }
 
 // ----------------------------------------------------------------
-// Entry Point Function
+// Builder Definition
 // ----------------------------------------------------------------
 
-pub fn create_buffer<'a, T>(init: impl BufferInit<'a, T>) -> BufferBuilder<'a, T, GpuOnly> {
+pub struct BufferBuilder<'a, T, const LOC: u8 = { GpuOnly.to_u8() }> {
+    source: BufferSource<'a, T>,
+    name: &'a str,
+    _marker: PhantomData<T>,
+}
+
+// ----------------------------------------------------------------
+// Entry Point Functions
+// ----------------------------------------------------------------
+
+pub fn create_buffer<'a, T>(
+    init: impl BufferInit<'a, T>,
+) -> BufferBuilder<'a, T, { GpuOnly.to_u8() }> {
     BufferBuilder {
         source: init.into_source(),
         name: "GpuBuffer",
@@ -58,23 +56,28 @@ pub fn create_buffer<'a, T>(init: impl BufferInit<'a, T>) -> BufferBuilder<'a, T
     }
 }
 
-pub fn read_buffer<'a, T, Loc: LocationInfo>(
-    buffer: &'a GpuBuffer<T, Loc>,
-) -> BufferReadBuilder<'a, T, Loc> {
-    BufferReadBuilder { buffer }
+pub fn read_buffer<'a, T>(slice: &'a GpuSlice<T>) -> BufferReadBuilder<'a, T> {
+    BufferReadBuilder { slice }
+}
+
+pub fn write_buffer<'a, 'b, T>(slice: &'a mut GpuSlice<'b, T>) -> BufferWriteBuilder<'a, 'b, T> {
+    BufferWriteBuilder { slice }
 }
 
 // ----------------------------------------------------------------
-// Builder Method
+// BufferBuilder Implementation
 // ----------------------------------------------------------------
 
-impl<'a, T, CurrentLoc: LocationInfo> BufferBuilder<'a, T, CurrentLoc> {
+impl<'a, T: Copy, const LOC: u8> BufferBuilder<'a, T, LOC> {
     pub fn named(mut self, name: &'a str) -> Self {
         self.name = name;
         self
     }
 
-    pub fn on<NewLoc>(self, _location: NewLoc) -> BufferBuilder<'a, T, NewLoc> {
+    pub fn on<const NEW_LOC: u8>(
+        self,
+        _location: LocationTag<NEW_LOC>,
+    ) -> BufferBuilder<'a, T, NEW_LOC> {
         BufferBuilder {
             source: self.source,
             name: self.name,
@@ -82,23 +85,22 @@ impl<'a, T, CurrentLoc: LocationInfo> BufferBuilder<'a, T, CurrentLoc> {
         }
     }
 
-    pub fn with(self, device: &Device) -> Result<GpuBuffer<T, CurrentLoc>> {
-        let (size, _initial_data) = match self.source {
-            BufferSource::Data(slice) => {
-                ((slice.len() * std::mem::size_of::<T>()) as u64, Some(slice))
-            }
-            BufferSource::Count(count) => ((count * std::mem::size_of::<T>()) as u64, None),
+    pub fn with(self, device: &Device) -> Result<GpuBuffer<T, LOC>> {
+        let size = match self.source {
+            BufferSource::Data(slice) => (slice.len() * std::mem::size_of::<T>()) as u64,
+            BufferSource::Count(count) => (count * std::mem::size_of::<T>()) as u64,
         };
 
         let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(
                 vk::BufferUsageFlags::STORAGE_BUFFER
-                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS // BDA
-                            | vk::BufferUsageFlags::TRANSFER_SRC
-                            | vk::BufferUsageFlags::TRANSFER_DST,
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::TRANSFER_SRC
+                    | vk::BufferUsageFlags::TRANSFER_DST,
             )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
         let buffer = unsafe {
             device
                 .shared
@@ -115,7 +117,7 @@ impl<'a, T, CurrentLoc: LocationInfo> BufferBuilder<'a, T, CurrentLoc> {
                 .get_buffer_memory_requirements(buffer)
         };
 
-        let desc = CurrentLoc::allocation_desc(self.name, requirements);
+        let desc = MemoryLocation::from_u8(LOC).allocation_desc(self.name, requirements);
 
         let allocation = device.shared.allocator.allocate(desc)?;
 
@@ -127,25 +129,6 @@ impl<'a, T, CurrentLoc: LocationInfo> BufferBuilder<'a, T, CurrentLoc> {
             )?;
         }
 
-        match self.source {
-            BufferSource::Data(slice) => {
-                if let Some(mapped_ptr) = allocation.mapped_ptr() {
-                    // ReBAR/UMA/HostVisible: Direct memcpy
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            slice.as_ptr() as *const u8,
-                            mapped_ptr.as_ptr() as *mut u8,
-                            size as usize,
-                        );
-                    }
-                } else {
-                    // GPU-Only: Staging Buffer + vkCmdCopyBuffer
-                    device.immediate_upload(buffer, slice)?;
-                }
-            }
-            BufferSource::Count(_) => {}
-        }
-
         let addr_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
         let device_address = unsafe {
             device
@@ -155,87 +138,81 @@ impl<'a, T, CurrentLoc: LocationInfo> BufferBuilder<'a, T, CurrentLoc> {
                 .get_buffer_device_address(&addr_info)
         };
 
-        // Creating and flushing the buffer
-        let gpu_buf = GpuBuffer::new(
+        let mut gpu_buf = GpuBuffer::new(
             buffer,
             Some(allocation),
             device_address,
             size,
             device.shared.clone(),
-            PhantomData,
         );
+
+        if let BufferSource::Data(slice) = self.source {
+            write_buffer_internal(&mut gpu_buf, slice, device)?;
+        }
 
         Ok(gpu_buf)
     }
 }
 
 // ----------------------------------------------------------------
-// Builder Method - Read
+// BufferReadBuilder Implementation
 // ----------------------------------------------------------------
 
-pub struct BufferReadBuilder<'a, T, Loc: LocationInfo> {
-    buffer: &'a GpuBuffer<T, Loc>,
+pub struct BufferReadBuilder<'a, T> {
+    slice: &'a GpuSlice<'a, T>,
 }
 
-pub struct BufferReadIntoBuilder<'a, 'd, T, Loc: LocationInfo> {
-    buffer: &'a GpuBuffer<T, Loc>,
+pub struct BufferReadIntoBuilder<'a, 'd, T> {
+    slice: &'a GpuSlice<'a, T>,
     dest: &'d mut [T],
 }
 
-fn read_buffer_internal<T: Copy, Loc: LocationInfo>(
-    buffer: &GpuBuffer<T, Loc>,
+fn read_buffer_internal<T: Copy>(
+    slice: &GpuSlice<T>,
     dest: &mut [T],
     device: &Device,
 ) -> Result<()> {
-    let size = buffer.size() as usize;
-
     let last_written_epoch = device
         .shared
         .page_tracker
-        .get_last_write_epoch(buffer.base_device_address());
+        .get_last_write_epoch(slice.bda(), slice.size());
 
-    let wait_info = vk::SemaphoreWaitInfo::default()
-        .semaphores(std::slice::from_ref(
-            &device.shared.cmd_manager.timeline_semaphore,
-        ))
-        .values(std::slice::from_ref(&last_written_epoch));
-
-    unsafe {
-        device
-            .shared
-            .core
-            .logical_device
-            .wait_semaphores(&wait_info, u64::MAX)?;
+    if last_written_epoch > 0 {
+        device.wait_timeline(last_written_epoch)?;
     }
 
-    if let Some(alloc) = buffer.allocation.as_ref() {
-        if let Some(mapped_ptr) = alloc.mapped_ptr() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    mapped_ptr.as_ptr() as *const u8,
-                    dest.as_mut_ptr() as *mut u8,
-                    size,
-                );
-            }
-            return Ok(());
-        }
+    // 1. Host-Visible: Mapped Pointer Direct Copy
+    if let Some(mapped) = slice.try_as_mapped_slice() {
+        let count = dest.len().min(mapped.len());
+        dest[..count].copy_from_slice(&mapped[..count]);
+        return Ok(());
     }
 
-    device.immediate_download(buffer.vk_buffer(), dest)?;
+    // 2. GPU-Only: Staging Buffer -> DMA Copy Task
+    let mut staging_buffer = create_buffer(dest.len()).on(GpuToCpu).with(device)?;
+    let copy_epoch = dma::copy(slice, &mut staging_buffer).with(device)?;
 
-    Ok(())
+    device.wait_timeline(copy_epoch)?;
+
+    if let Some(mapped) = staging_buffer.try_as_mapped_slice() {
+        let count = dest.len().min(mapped.len());
+        dest[..count].copy_from_slice(&mapped[..count]);
+        return Ok(());
+    }
+
+    Err(GpuError::MemoryMappingFailed)
 }
 
-impl<'a, T: Copy, Loc: LocationInfo> BufferReadBuilder<'a, T, Loc> {
-    pub fn into<'d>(self, dest: &'d mut [T]) -> BufferReadIntoBuilder<'a, 'd, T, Loc> {
+impl<'a, T: Copy> BufferReadBuilder<'a, T> {
+    pub fn into<'d>(self, dest: &'d mut [T]) -> BufferReadIntoBuilder<'a, 'd, T> {
         BufferReadIntoBuilder {
-            buffer: self.buffer,
+            slice: self.slice,
             dest,
         }
     }
 
     pub fn with(self, device: &Device) -> Result<Vec<T>> {
-        let size = self.buffer.size() as usize;
+        let size = self.slice.size() as usize;
         let count = size / std::mem::size_of::<T>();
 
         let mut vec = Vec::with_capacity(count);
@@ -243,16 +220,16 @@ impl<'a, T: Copy, Loc: LocationInfo> BufferReadBuilder<'a, T, Loc> {
             vec.set_len(count);
         }
 
-        read_buffer_internal(self.buffer, &mut vec, device)?;
+        read_buffer_internal(self.slice, &mut vec, device)?;
 
         Ok(vec)
     }
 }
 
-impl<'a, 'd, T: Copy, Loc: LocationInfo> BufferReadIntoBuilder<'a, 'd, T, Loc> {
+impl<'a, 'd, T: Copy> BufferReadIntoBuilder<'a, 'd, T> {
     pub fn with(self, device: &Device) -> Result<()> {
         let dest_size = self.dest.len() * std::mem::size_of::<T>();
-        let src_size = self.buffer.size() as usize;
+        let src_size = self.slice.size() as usize;
 
         assert!(
             dest_size >= src_size,
@@ -261,8 +238,74 @@ impl<'a, 'd, T: Copy, Loc: LocationInfo> BufferReadIntoBuilder<'a, 'd, T, Loc> {
             dest_size
         );
 
-        // Exactly Gpu buffer size
         let exact_dest = &mut self.dest[0..(src_size / std::mem::size_of::<T>())];
-        read_buffer_internal(self.buffer, exact_dest, device)
+        read_buffer_internal(self.slice, exact_dest, device)
+    }
+}
+
+// ----------------------------------------------------------------
+// BufferWriteBuilder Implementation
+// ----------------------------------------------------------------
+
+pub struct BufferWriteBuilder<'a, 'b, T> {
+    slice: &'a mut GpuSlice<'b, T>,
+}
+
+pub struct BufferWriteFromBuilder<'a, 'b, 's, T> {
+    slice: &'a mut GpuSlice<'b, T>,
+    src: &'s [T],
+}
+
+fn write_buffer_internal<T: Copy>(
+    slice: &mut GpuSlice<T>,
+    src: &[T],
+    device: &Device,
+) -> Result<()> {
+    let size = src.len() * std::mem::size_of::<T>();
+
+    // 1. ReBAR / UMA / HostVisible: Mapped Pointer Direct Copy
+    if let Some(mapped) = slice.try_as_mut_slice() {
+        let count = src.len().min(mapped.len());
+        mapped[..count].copy_from_slice(&src[..count]);
+        return Ok(());
+    }
+
+    // 2. GPU-Only & <= 64KB & 4-byte aligned: vkCmdUpdateBuffer (dma::update)
+    if size <= 65536 && slice.offset() % 4 == 0 && size % 4 == 0 {
+        dma::update(slice, src).with(device)?;
+        return Ok(());
+    }
+
+    // 3. GPU-Only: Staging Buffer + DMA Copy (dma::copy)
+    let staging_buffer = create_buffer(src).on(CpuToGpu).with(device)?;
+    let copy_epoch = dma::copy(&staging_buffer.as_slice(), slice).with(device)?;
+
+    device.wait_timeline(copy_epoch)?;
+
+    Ok(())
+}
+
+impl<'a, 'b, T: Copy> BufferWriteBuilder<'a, 'b, T> {
+    pub fn from<'s>(self, src: &'s [T]) -> BufferWriteFromBuilder<'a, 'b, 's, T> {
+        BufferWriteFromBuilder {
+            slice: self.slice,
+            src,
+        }
+    }
+}
+
+impl<'a, 'b, 's, T: Copy> BufferWriteFromBuilder<'a, 'b, 's, T> {
+    pub fn with(self, device: &Device) -> Result<()> {
+        let src_size = self.src.len() * std::mem::size_of::<T>();
+        let dst_size = self.slice.size() as usize;
+
+        assert!(
+            dst_size >= src_size,
+            "Source slice is too large for GpuSlice! (Src: {} bytes, Dest: {} bytes)",
+            src_size,
+            dst_size
+        );
+
+        write_buffer_internal(self.slice, self.src, device)
     }
 }

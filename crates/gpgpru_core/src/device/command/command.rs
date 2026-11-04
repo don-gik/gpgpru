@@ -1,5 +1,3 @@
-// src/device/command/command.rs
-
 use crate::__private::{AccessType, HazardTrace, Task};
 use crate::Device;
 use crate::Result;
@@ -73,9 +71,12 @@ where
     }
 
     fn prepare_task(&self, device: &Device, workgroup: impl IntoWorkgroup) -> Result<Task> {
-        let mut task = Task::new(&self.push_data, workgroup.into_workgroup());
-        let pipeline_id =
-            device.get_pipeline(self.spirv_code, task.push_constants_size, self.entry_point)?;
+        let mut task = Task::new_compute(&self.push_data, workgroup.into_workgroup());
+        let pipeline_id = device.get_pipeline(
+            self.spirv_code,
+            task.push_constants_size(),
+            self.entry_point,
+        )?;
 
         let target_epoch = device.pending_epoch();
         let task_idx = device.next_task_index();
@@ -107,7 +108,7 @@ where
         });
 
         task.has_write = has_write;
-        Ok(task.pipeline_id(pipeline_id))
+        Ok(task.with_pipeline_id(pipeline_id))
     }
 
     pub fn with(&self, device: &Device, workgroup: impl IntoWorkgroup) -> Result<u64> {
@@ -115,6 +116,7 @@ where
         device.push_command(task);
 
         let signal_value = device.dispatch()?;
+
         Ok(signal_value)
     }
 

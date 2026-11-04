@@ -1,24 +1,16 @@
-// src/lib.rs
+mod ffi;
+mod kernel;
 
-mod ir;
-mod types;
-
-mod lowering;
-
-mod macros;
-
-pub(crate) use ir::*;
-pub(crate) use lowering::*;
-pub(crate) use types::*;
-
-pub(crate) use macros::*;
+use ffi::*;
+use kernel::*;
 
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 
 #[proc_macro_attribute]
-pub fn compute(attr: TokenStream, item: TokenStream) -> TokenStream {
-    match compute_impl(attr.into(), item.into()) {
+pub fn kernel(attr: TokenStream, body: TokenStream) -> TokenStream {
+    match kernel_impl(attr.into(), body.into()) {
         Ok(tokens) => tokens.into(),
-        Err(err) => err.into_compile_error().into(),
+        Err(err) => err.to_compile_error().into(),
     }
 }

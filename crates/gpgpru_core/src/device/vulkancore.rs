@@ -1,19 +1,4 @@
-// src/device/vulkancore.rs
-
-use crate::{GpuError, Result};
-
-use parking_lot::Mutex;
-
-use ash::vk::{self, DeviceCreateInfo};
-use ash::{Device as LogicalDevice, Entry, Instance};
-use vk::API_VERSION_1_3;
-use vk::{
-    ApplicationInfo, DeviceQueueCreateInfo, InstanceCreateInfo, PhysicalDevice,
-    PhysicalDeviceProperties, PhysicalDeviceType, PhysicalDeviceVulkan12Features,
-    PhysicalDeviceVulkan13Features, Queue, QueueFlags,
-};
-
-use super::debug::DebugContext;
+use super::*;
 
 /// Strategy for selecting a physical device (GPU) for the Vulkan core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,12 +18,16 @@ pub enum DeviceSelector {
 pub(crate) struct VulkanCore {
     pub(crate) _entry: Entry,
     pub(crate) instance: Instance,
-    pub(crate) physical_device: PhysicalDevice,
+    pub(crate) physical_device: vk::PhysicalDevice,
     pub(crate) logical_device: LogicalDevice,
-    pub(crate) compute_queue: Mutex<Queue>,
-    pub(crate) queue_family_index: u32,
 
-    _debug_context: DebugContext,
+    pub(crate) compute_queue: Arc<Mutex<vk::Queue>>,
+    pub(crate) compute_queue_family_index: u32,
+
+    pub(crate) _transfer_queue: Arc<Mutex<vk::Queue>>,
+    pub(crate) transfer_queue_family_index: u32,
+
+    pub(crate) _debug_context: DebugContext,
 }
 
 impl VulkanCore {
@@ -56,20 +45,34 @@ impl VulkanCore {
         let debug_context = DebugContext::new(&entry, &instance)?;
 
         // Get physical device
-        let (physical_device, queue_family_index) =
+        let (physical_device, compute_queue_family_index, transfer_queue_family_index) =
             Self::get_physical_device(&instance, device_selector)?;
 
-        // Get logical device
-        let (logical_device, compute_queue) =
-            Self::create_logical_device(&instance, physical_device, queue_family_index)?;
+        // Get logical device & queues
+        let (logical_device, compute_queue_handle, transfer_queue_handle) =
+            Self::create_logical_device(
+                &instance,
+                physical_device,
+                compute_queue_family_index,
+                transfer_queue_family_index,
+            )?;
+
+        let compute_queue = Arc::new(Mutex::new(compute_queue_handle));
+        let _transfer_queue = if compute_queue_handle == transfer_queue_handle {
+            Arc::clone(&compute_queue)
+        } else {
+            Arc::new(Mutex::new(transfer_queue_handle))
+        };
 
         Ok(Self {
             _entry: entry,
             instance,
             physical_device,
             logical_device,
-            compute_queue: Mutex::new(compute_queue),
-            queue_family_index,
+            compute_queue,
+            compute_queue_family_index,
+            _transfer_queue,
+            transfer_queue_family_index,
             _debug_context: debug_context,
         })
     }
@@ -88,11 +91,11 @@ impl VulkanCore {
             extensions.push(ash::ext::debug_utils::NAME.as_ptr());
         }
 
-        let app_info = ApplicationInfo::default()
+        let app_info = vk::ApplicationInfo::default()
             .application_name(c"GPGPRU ENGINE")
-            .api_version(API_VERSION_1_3);
+            .api_version(vk::API_VERSION_1_3);
 
-        let create_info = InstanceCreateInfo::default()
+        let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions);
@@ -100,8 +103,9 @@ impl VulkanCore {
         unsafe { Ok(entry.create_instance(&create_info, None)?) }
     }
 
-    /// Fetches compute physical device from `&Instance` and returns [`Result<(PhysicalDevice, u32)>`].
+    /// Fetches compute physical device from `&Instance` and returns [`Result<(PhysicalDevice, u32, u32)>`].
     /// `u32` is for the queue family index for `PhysicalDevice`.
+    /// One for compute queue, another one is for transfer queue.
     /// The device selection score is based on `DeviceSelecter` enum.
     ///
     /// The device is guaranteed to have compute queue.
@@ -114,7 +118,7 @@ impl VulkanCore {
     fn get_physical_device(
         instance: &Instance,
         device_selector: DeviceSelector,
-    ) -> Result<(PhysicalDevice, u32)> {
+    ) -> Result<(vk::PhysicalDevice, u32, u32)> {
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
 
         if physical_devices.is_empty() {
@@ -133,29 +137,48 @@ impl VulkanCore {
                 unsafe { instance.get_physical_device_queue_family_properties(pdevice) };
 
             let mut compute_queue_idx = None;
+            let mut dedicated_transfer_queue_idx = None;
 
-            // 1. Compute-only-queue
+            // -----------------------------------------------------------------
+            // Compute Queue
+            // -----------------------------------------------------------------
+            // 1-1) Pure Compute Queue
             for (idx, info) in queue_props.iter().enumerate() {
-                if info.queue_flags.contains(QueueFlags::COMPUTE)
-                    && !info.queue_flags.contains(QueueFlags::GRAPHICS)
+                if info.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                    && !info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
                 {
                     compute_queue_idx = Some(idx as u32);
                     break;
                 }
             }
 
-            // 2. Fallback to general queue
+            // 1-2) Fallback to general queue
             if compute_queue_idx.is_none() {
                 for (idx, info) in queue_props.iter().enumerate() {
-                    if info.queue_flags.contains(QueueFlags::COMPUTE) {
+                    if info.queue_flags.contains(vk::QueueFlags::COMPUTE) {
                         compute_queue_idx = Some(idx as u32);
                         break;
                     }
                 }
             }
 
+            // -----------------------------------------------------------------
+            // Transfer Queue
+            // -----------------------------------------------------------------
+            // Pure transfer queue
+            for (idx, info) in queue_props.iter().enumerate() {
+                let idx = idx as u32;
+                if info.queue_flags.contains(vk::QueueFlags::TRANSFER)
+                    && !info.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                    && !info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                {
+                    dedicated_transfer_queue_idx = Some(idx);
+                    break;
+                }
+            }
+
             // Skip when no compute queue
-            let queue_idx = match compute_queue_idx {
+            let compute_idx = match compute_queue_idx {
                 Some(idx) => {
                     found_compute_queue = true;
                     idx
@@ -164,16 +187,18 @@ impl VulkanCore {
             };
 
             // Checks if vulkan 1.3 is supported
-            if props.api_version < API_VERSION_1_3 {
+            if props.api_version < vk::API_VERSION_1_3 {
                 continue; // Old hardware -> Skip
             }
             found_vulkan_1_3 = true;
+
+            let transfer_idx = dedicated_transfer_queue_idx.unwrap_or(compute_idx);
 
             // 3. Now DeviceSelector Score
             let score = Self::calculate_device_score(device_selector, &props);
             if score > max_score {
                 max_score = score;
-                best_device = Some((pdevice, queue_idx));
+                best_device = Some((pdevice, compute_idx, transfer_idx));
             }
         }
 
@@ -193,37 +218,58 @@ impl VulkanCore {
 
     /// Creates logical device using `&Instance`, `PhysicalDevice`, and `u32`.
     ///
-    /// Returns [`Result<(LogicalDevice, Queue)>`].
+    /// Returns [`Result<(LogicalDevice, Queue, Queue)>`].
     ///
     /// # Error
     /// Fails when Vulkan device creation command fails to execute.
     fn create_logical_device(
         instance: &Instance,
-        physical_device: PhysicalDevice,
-        queue_family_index: u32,
-    ) -> Result<(LogicalDevice, Queue)> {
-        let queue_priorities = [1.0f32];
-        let queue_create_info = DeviceQueueCreateInfo::default()
-            .queue_family_index(queue_family_index)
-            .queue_priorities(&queue_priorities);
+        physical_device: vk::PhysicalDevice,
+        compute_queue_family_idx: u32,
+        transfer_queue_family_idx: u32,
+    ) -> Result<(LogicalDevice, vk::Queue, vk::Queue)> {
+        let queue_props =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
 
-        // Vulkan Int64 feature
-        let features = ash::vk::PhysicalDeviceFeatures::default().shader_int64(true);
+        let mut queue_create_infos = Vec::new();
+        let queue_priorities = [1.0f32, 1.0f32];
 
-        // Vulkan 1.2 feature
-        let mut features_12 = PhysicalDeviceVulkan12Features::default()
+        // Check whether the queue family is same or not.
+        if compute_queue_family_idx == transfer_queue_family_idx {
+            let available_count = queue_props[compute_queue_family_idx as usize].queue_count;
+            let request_count = available_count.min(2);
+
+            queue_create_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(compute_queue_family_idx)
+                    .queue_priorities(&queue_priorities[..request_count as usize]),
+            )
+        } else {
+            queue_create_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(compute_queue_family_idx)
+                    .queue_priorities(&queue_priorities[..1]),
+            );
+            queue_create_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(transfer_queue_family_idx)
+                    .queue_priorities(&queue_priorities[..1]),
+            );
+        }
+
+        // Feature Flags - for BDA
+        let features = vk::PhysicalDeviceFeatures::default().shader_int64(true);
+
+        let mut features_12 = vk::PhysicalDeviceVulkan12Features::default()
             .timeline_semaphore(true)
             .buffer_device_address(true)
             .descriptor_indexing(true);
 
-        // Vulkan 1.3 feature
-        let mut features_13 = PhysicalDeviceVulkan13Features::default()
+        let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .synchronization2(true)
             .dynamic_rendering(true);
 
-        let queue_create_infos = [queue_create_info];
-
-        let device_create_info = DeviceCreateInfo::default()
+        let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_features(&features)
             .push_next(&mut features_12)
@@ -232,28 +278,41 @@ impl VulkanCore {
         let logical_device =
             unsafe { instance.create_device(physical_device, &device_create_info, None)? };
 
-        let queue = unsafe { logical_device.get_device_queue(queue_family_index, 0) };
+        // Extract Queue handles
+        let compute_queue = unsafe { logical_device.get_device_queue(compute_queue_family_idx, 0) };
 
-        Ok((logical_device, queue))
+        let _transfer_queue = if compute_queue_family_idx == transfer_queue_family_idx {
+            let available_count = queue_props[compute_queue_family_idx as usize].queue_count;
+
+            if available_count >= 2 {
+                unsafe { logical_device.get_device_queue(compute_queue_family_idx, 1) }
+            } else {
+                compute_queue
+            }
+        } else {
+            unsafe { logical_device.get_device_queue(transfer_queue_family_idx, 0) }
+        };
+
+        Ok((logical_device, compute_queue, _transfer_queue))
     }
 
     /// Gets physical device, a selector enum and returns a score.
     fn calculate_device_score(
         device_selector: DeviceSelector,
-        props: &PhysicalDeviceProperties,
+        props: &vk::PhysicalDeviceProperties,
     ) -> u32 {
         match (device_selector, props.device_type) {
-            (DeviceSelector::Discrete, PhysicalDeviceType::DISCRETE_GPU) => 1000,
+            (DeviceSelector::Discrete, vk::PhysicalDeviceType::DISCRETE_GPU) => 1000,
             (DeviceSelector::Discrete, _) => 0,
 
-            (DeviceSelector::Integrated, PhysicalDeviceType::INTEGRATED_GPU) => 1000,
+            (DeviceSelector::Integrated, vk::PhysicalDeviceType::INTEGRATED_GPU) => 1000,
             (DeviceSelector::Integrated, _) => 0,
 
             (DeviceSelector::VendorId(id), _) if props.vendor_id == id => 1000,
             (DeviceSelector::VendorId(_), _) => 0,
 
-            (DeviceSelector::Default, PhysicalDeviceType::DISCRETE_GPU) => 500,
-            (DeviceSelector::Default, PhysicalDeviceType::INTEGRATED_GPU) => 200,
+            (DeviceSelector::Default, vk::PhysicalDeviceType::DISCRETE_GPU) => 500,
+            (DeviceSelector::Default, vk::PhysicalDeviceType::INTEGRATED_GPU) => 200,
             (DeviceSelector::Default, _) => 100,
         }
     }

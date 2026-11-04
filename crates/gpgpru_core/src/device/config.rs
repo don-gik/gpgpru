@@ -1,18 +1,16 @@
-// src/device/config.rs
-
 use super::DeviceSelector;
 
 #[derive(Debug, Clone)]
 pub struct DeviceConfig {
-    pub device_selector: DeviceSelector,
-    pub dynamic_buffer_capacity: u64,
+    pub(crate) device_selector: DeviceSelector,
+    // pub dynamic_buffer_capacity: u64,
 }
 
 impl Default for DeviceConfig {
     fn default() -> Self {
         Self {
             device_selector: DeviceSelector::Default,
-            dynamic_buffer_capacity: 64 * 1024 * 1024, // 64 MB
+            // dynamic_buffer_capacity: 64 * 1024 * 1024, // 64 MB
         }
     }
 }
@@ -23,8 +21,8 @@ impl DeviceConfig {
         self
     }
 
-    pub fn with_dynamic_buffer_capacity(mut self, dynamic_buffer_capacity: u64) -> Self {
-        self.dynamic_buffer_capacity = dynamic_buffer_capacity;
-        self
-    }
+    // pub fn with_dynamic_buffer_capacity(mut self, dynamic_buffer_capacity: u64) -> Self {
+    //     self.dynamic_buffer_capacity = dynamic_buffer_capacity;
+    //     self
+    // }
 }

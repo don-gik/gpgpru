@@ -1,10 +1,9 @@
-// src/device/mod.rs
-
 /// Crate modules
 mod allocator;
 mod command;
 mod config;
 mod debug;
+pub mod dma;
 mod garbage;
 mod pipeline;
 mod vulkancore;
@@ -14,22 +13,26 @@ pub use config::DeviceConfig;
 pub use vulkancore::DeviceSelector;
 
 // Pub some modules
-pub(crate) use allocator::AllocDesc;
-pub(crate) use allocator::AllocationManager;
-pub(crate) use command::CommandManager;
-pub(crate) use garbage::{Collectable, Dispose, GarbageManager};
-pub(crate) use pipeline::PipelineManager;
+pub(crate) use allocator::*;
+pub(crate) use command::{CommandManager, DmaOp, TaskPayload};
+pub(crate) use garbage::*;
+pub(crate) use pipeline::*;
 pub(crate) use vulkancore::VulkanCore;
 
 // Use crate modules
-use crate::Result;
-use crate::page::PageTracker;
+use super::*;
+use debug::DebugContext;
 
 // Use std, external crates
-use ash::vk::{Buffer, BufferCreateInfo, BufferUsageFlags, SemaphoreWaitInfo, SharingMode};
+use ash::Device as LogicalDevice;
+use ash::{Entry, Instance};
+use crossbeam_queue::SegQueue;
+use dashmap::DashMap;
+use parking_lot::Mutex;
+use smallvec::{SmallVec, smallvec};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
-use tracing::error;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub(crate) struct SharedContext {
     pub(crate) core: Arc<VulkanCore>,
@@ -124,8 +127,13 @@ impl Device {
     }
 
     #[inline]
-    pub fn next_task_index(&self) -> u16 {
+    pub(crate) fn next_task_index(&self) -> u16 {
         self.shared.cmd_manager.task_queue.len()
+    }
+
+    #[inline]
+    pub fn pending_tasks(&self) -> usize {
+        self.shared.cmd_manager.task_queue.len() as usize
     }
 
     pub fn wait_timeline(&self, value: u64) -> Result<()> {
@@ -133,8 +141,12 @@ impl Device {
             return Ok(());
         }
 
+        if self.pending_tasks() > 0 {
+            self.dispatch()?;
+        }
+
         let semaphore = self.shared.cmd_manager.timeline_semaphore;
-        let wait_info = SemaphoreWaitInfo::default()
+        let wait_info = vk::SemaphoreWaitInfo::default()
             .semaphores(std::slice::from_ref(&semaphore))
             .values(std::slice::from_ref(&value));
 
@@ -155,149 +167,7 @@ impl Device {
         Ok(())
     }
 
-    pub(crate) fn immediate_upload<T>(&self, dst_buffer: Buffer, data: &[T]) -> Result<()> {
-        let size = (std::mem::size_of_val(data)) as u64;
-        if size == 0 {
-            return Ok(());
-        }
-
-        // 1. Staging Buffer (CpuToGpu / HostVisible)
-        let staging_buffer_info = BufferCreateInfo::default()
-            .size(size)
-            .usage(BufferUsageFlags::TRANSFER_SRC)
-            .sharing_mode(SharingMode::EXCLUSIVE);
-
-        let staging_buffer = unsafe {
-            self.shared
-                .core
-                .logical_device
-                .create_buffer(&staging_buffer_info, None)?
-        };
-
-        let requirements = unsafe {
-            self.shared
-                .core
-                .logical_device
-                .get_buffer_memory_requirements(staging_buffer)
-        };
-
-        // Staging buffer allocation
-        let staging_alloc = self.shared.allocator.allocate(AllocDesc {
-            name: "StagingBuffer_Upload",
-            requirements,
-            location: gpu_allocator::MemoryLocation::CpuToGpu,
-        })?;
-
-        unsafe {
-            self.shared.core.logical_device.bind_buffer_memory(
-                staging_buffer,
-                staging_alloc.memory(),
-                staging_alloc.offset(),
-            )?;
-        }
-
-        // 2. CPU -> Staging Buffer memcpy
-        if let Some(mapped_ptr) = staging_alloc.mapped_ptr() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    data.as_ptr() as *const u8,
-                    mapped_ptr.as_ptr() as *mut u8,
-                    size as usize,
-                );
-            }
-        }
-
-        // 3. Command Buffer -> vkCopyBuffer
-        self.shared
-            .cmd_manager
-            .immediate_copy(staging_buffer, dst_buffer, size)?;
-
-        // Drop Staging Resources
-        unsafe {
-            self.shared
-                .core
-                .logical_device
-                .destroy_buffer(staging_buffer, None);
-        }
-        self.shared.allocator.free(staging_alloc)?;
-
-        Ok(())
-    }
-
-    pub(crate) fn immediate_download<T>(
-        &self,
-        src_buffer: Buffer,
-        out_data: &mut [T],
-    ) -> Result<()> {
-        let size = (std::mem::size_of_val(out_data)) as u64;
-        if size == 0 {
-            return Ok(());
-        }
-
-        // 1. Staging Buffer (CpuToGpu / HostVisible)
-        let staging_buffer_info = BufferCreateInfo::default()
-            .size(size)
-            .usage(BufferUsageFlags::TRANSFER_DST)
-            .sharing_mode(SharingMode::EXCLUSIVE);
-
-        let staging_buffer = unsafe {
-            self.shared
-                .core
-                .logical_device
-                .create_buffer(&staging_buffer_info, None)?
-        };
-
-        let requirements = unsafe {
-            self.shared
-                .core
-                .logical_device
-                .get_buffer_memory_requirements(staging_buffer)
-        };
-
-        // Staging buffer allocation
-        let staging_alloc = self.shared.allocator.allocate(AllocDesc {
-            name: "StagingBuffer_Download",
-            requirements,
-            location: gpu_allocator::MemoryLocation::GpuToCpu,
-        })?;
-
-        unsafe {
-            self.shared.core.logical_device.bind_buffer_memory(
-                staging_buffer,
-                staging_alloc.memory(),
-                staging_alloc.offset(),
-            )?;
-        }
-
-        // 2. Command Buffer -> vkCopyBuffer
-        self.shared
-            .cmd_manager
-            .immediate_copy(src_buffer, staging_buffer, size)?;
-
-        // 3. Staging Buffer -> CPU memcpy
-        if let Some(mapped_ptr) = staging_alloc.mapped_ptr() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    mapped_ptr.as_ptr() as *const u8,
-                    out_data.as_mut_ptr() as *mut u8,
-                    size as usize,
-                );
-            }
-        }
-
-        // Drop Staging Resources
-        unsafe {
-            self.shared
-                .core
-                .logical_device
-                .destroy_buffer(staging_buffer, None);
-        }
-        self.shared.allocator.free(staging_alloc)?;
-
-        Ok(())
-    }
-
-    pub fn get_pipeline<'a>(
+    pub(crate) fn get_pipeline<'a>(
         &self,
         spirv_code: &'a [u32],
         push_constants_size: u32,
@@ -330,7 +200,7 @@ impl Drop for SharedContext {
             let _ = self.cmd_manager.task_queue.drain();
 
             if let Err(e) = self.core.logical_device.device_wait_idle() {
-                error!(error = ?e, "Failed to wait for device idle");
+                tracing::warn!(target: "gpgpru", error = ?e, "Device wait idle failed during cleanup");
             }
             self.pipeline.destroy();
 

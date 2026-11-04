@@ -1,38 +1,49 @@
 // examples/basic_init.rs
 
-use gpgpru::prelude::*;
-use gpgpru::{Device, Result, compute, create_buffer, read_buffer};
+// use gpgpru::prelude::*;
+use gpgpru::config::{DeviceConfig, DeviceSelector};
+use gpgpru::{Device, GpuSlice, Result, create_buffer, kernel, read_buffer};
 
-#[compute(threads(64, 1, 1))]
-fn scale(data: &mut [f32], factor: f32, global_id_x: GlobalIdX) {
-    let idx = global_id_x;
-    if idx < data.len() {
-        data[idx] *= factor;
-    }
+use std::time::Instant;
 
-    // let stuff = [0.0; 3];
-}
+#[kernel("examples/basic_init.slang", "scale")]
+fn scale(_gpu_data_ptr: &mut GpuSlice<f32>, _gpu_data_len: u32, val: f32) {}
 
 fn main() -> Result<()> {
     println!("Initializing gpgpru device");
 
-    let device = Device::new()?;
+    let config = DeviceConfig::default().with_selector(DeviceSelector::Default);
+    let device = Device::with(config)?;
 
     println!("Success, loaded vulkan device.");
 
-    let mut host_data = vec![1.0f32; 1024];
+    let size = 524288;
+
+    let mut host_data = vec![1.0f32; size];
     let mut buffer = create_buffer(&host_data).with(&device)?;
+
+    // dbg!(&buffer.bda());
 
     println!("Buffer created.");
 
-    let groups = (1024 / 64, 1, 1);
-    scale(&mut buffer, 2.0f32).with(&device, groups)?;
+    let groups = (size / 128, 1, 1);
+    let buffer_len = buffer.size() as u32;
 
-    println!("Kernel run succeeded.");
+    let start = Instant::now();
+    for _i in 0..5 {
+        scale(&mut buffer, buffer_len, 1.0f32).queue(&device, groups)?;
+    }
+    device.wait_timeline(device.dispatch()?)?;
+    let dur = (Instant::now() - start) / 5;
+
+    let flops = (size as f64 * 100000.0 * 3.0) / dur.as_secs_f64();
+
+    println!("Kernel run succeeded in {:?}", dur);
+    println!("{:.2} GFLOPS", flops / 1e9);
 
     read_buffer(&buffer).into(&mut host_data).with(&device)?;
 
-    println!("{:?}", host_data);
+    println!("{:?}", &host_data[0..3]);
 
     println!("Drop device testing");
 

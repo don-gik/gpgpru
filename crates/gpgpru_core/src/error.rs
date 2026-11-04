@@ -1,5 +1,3 @@
-// src/error.rs
-
 use ash::vk;
 use thiserror::Error;
 
@@ -50,6 +48,9 @@ pub enum GpuError {
 
     #[error("Invalid Compute Task.")]
     InvalidComputeTask,
+
+    #[error("Failed to wait for device idle")]
+    FailedWaitIdle,
 }
 
 /// `Result` for `gpgpru` crate.

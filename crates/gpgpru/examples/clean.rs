@@ -1,15 +1,10 @@
 // examples/basic_init.rs
 
 use gpgpru::prelude::*;
-use gpgpru::{Device, Result, compute, create_buffer, read_buffer};
+use gpgpru::{Device, GpuSlice, Result, create_buffer, kernel, read_buffer};
 
-#[compute(threads(256, 1, 1))]
-fn scale(data: &mut [f32], factor: f32, global_id_x: GlobalIdX) {
-    let idx = global_id_x;
-    if idx < data.len() {
-        data[idx] *= factor;
-    }
-}
+#[kernel("examples/clean.slang", "scale")]
+pub fn scale(data: &mut GpuSlice<f32>, data_len: u32, factor: f32) {}
 
 fn main() -> Result<()> {
     const DATA_SIZE: usize = 1_000_000;
@@ -25,7 +20,8 @@ fn main() -> Result<()> {
     let group_count = (DATA_SIZE.div_ceil(THREADS_PER_GROUP)) as u32;
 
     println!("Running Kernel");
-    scale(&mut buffer, FACTOR).with(&device, (group_count, 1, 1))?;
+    let buffer_size = buffer.size() as u32;
+    scale(&mut buffer, buffer_size, FACTOR).with(&device, (group_count, 1, 1))?;
 
     let mut result = vec![0.0f32; DATA_SIZE];
     read_buffer(&buffer).into(&mut result).with(&device)?;

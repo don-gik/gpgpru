@@ -1,7 +1,4 @@
-// src/device/debug.rs
-
-use crate::Result;
-use ash::{Entry, Instance};
+use super::*;
 
 #[cfg(debug_assertions)]
 use ash::vk;
