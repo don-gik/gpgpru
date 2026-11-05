@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let cpp_source_dir = manifest_dir.join("../../shadertool-cpp");
+    let cpp_source_dir = manifest_dir.join("shadertool-cpp");
 
     // 1. Configure CMake build with PIC enabled for proc-macro loading
     let mut config = cmake::Config::new(&cpp_source_dir);
@@ -19,6 +19,8 @@ fn main() {
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-search=native={}/lib64", dst.display());
     println!("cargo:rustc-link-lib=static=shadertool");
+    println!("cargo:rustc-link-lib=dylib=SPIRV-Tools-opt");
+    println!("cargo:rustc-link-lib=dylib=SPIRV-Tools");
 
     // 3. Platform-specific C++ standard library and system dependencies
     let target = env::var("TARGET").unwrap();

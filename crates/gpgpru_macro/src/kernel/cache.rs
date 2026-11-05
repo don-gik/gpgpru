@@ -229,6 +229,7 @@ impl ShaderCache {
         kernel_name: &str,
         slang_path: &Utf8Path,
         entry_point: &str,
+        high_precision: bool,
     ) -> Result<ShaderReflection, SlangError> {
         let flattened_path = Self::flatten_workspace_path(slang_path);
         if !slang_path.exists() {
@@ -264,7 +265,12 @@ impl ShaderCache {
         }
 
         // Actual compiling - cache miss
-        let live_result = GLOBAL_CONTEXT.compile(kernel_name, slang_path.as_str(), entry_point)?;
+        let live_result = GLOBAL_CONTEXT.compile(
+            kernel_name,
+            slang_path.as_str(),
+            entry_point,
+            high_precision,
+        )?;
         let reflection = ShaderReflection::from_compile_result(&live_result);
 
         // Save disk + memory cache update

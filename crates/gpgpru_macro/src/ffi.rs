@@ -75,6 +75,7 @@ pub mod raw {
         FileNotFound,
         SyntaxError,
         LinkError,
+        OptimizationFailed,
         InternalError,
         UnknownError = 9999,
     }
@@ -94,6 +95,7 @@ pub mod raw {
     pub struct CompileResult {
         pub success: bool,
         pub error_info: ErrorInfo,
+        pub optim_info: ErrorInfo,
 
         pub code_bytes: *const u8,
         pub code_size: usize,
@@ -117,6 +119,8 @@ pub mod raw {
             module_name: *const c_char,
             module_path: *const c_char,
             entry_point: *const c_char,
+            should_optimize: bool,
+            high_prevision: bool,
         ) -> CompileResult;
         pub fn shadertool_free_compile_result(result: *mut CompileResult);
     }
@@ -133,6 +137,15 @@ pub enum SlangError {
 
     #[error("Slang shader compilation failed [{code:?}]: {message} (Line {line}:{column})")]
     CompileFailed {
+        code: raw::ErrorCode,
+        message: String,
+        file_path: String,
+        line: i32,
+        column: i32,
+    },
+
+    #[error("Slang shader optimization failed [{code:?}]: {message} (Line {line}:{column})")]
+    OptimizationFailed {
         code: raw::ErrorCode,
         message: String,
         file_path: String,
@@ -162,6 +175,7 @@ impl ShaderContext {
         module_name: &str,
         path: &str,
         entry: &str,
+        high_precision: bool,
     ) -> Result<SafeCompileResult, SlangError> {
         let raw_module_name = CString::new(module_name)?;
         let raw_path = CString::new(path)?;
@@ -173,6 +187,8 @@ impl ShaderContext {
                 raw_module_name.as_ptr(),
                 raw_path.as_ptr(),
                 raw_entry.as_ptr(),
+                !Self::is_opt_level_zero(),
+                high_precision,
             )
         };
 
@@ -183,6 +199,19 @@ impl ShaderContext {
         }
 
         Ok(safe_result)
+    }
+
+    fn is_opt_level_zero() -> bool {
+        let args: Vec<String> = std::env::args().collect();
+
+        let explicitly_zero = args.iter().any(|arg| arg.contains("opt-level=0"));
+
+        let has_any_optimization = args.iter().any(|arg| {
+            (arg.contains("opt-level=") || arg.starts_with("opt-level"))
+                && !arg.contains("opt-level=0")
+        });
+
+        explicitly_zero || !has_any_optimization
     }
 }
 
@@ -238,35 +267,57 @@ impl SafeCompileResult {
     }
 
     pub fn to_error(&self) -> Option<SlangError> {
-        if self.0.success {
-            return None;
+        let parse_info = |info: &raw::ErrorInfo| -> (String, String) {
+            let msg = if info.message.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(info.message) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+
+            let file = if info.file_path.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(info.file_path) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+
+            (msg, file)
+        };
+
+        if self.0.error_info.code != raw::ErrorCode::Ok {
+            let (message, file_path) = parse_info(&self.0.error_info);
+            return Some(SlangError::CompileFailed {
+                code: self.0.error_info.code,
+                message: if message.is_empty() {
+                    "Compilation failed".into()
+                } else {
+                    message
+                },
+                file_path,
+                line: self.0.error_info.line,
+                column: self.0.error_info.column,
+            });
         }
 
-        let info = &self.0.error_info;
+        if self.0.optim_info.code != raw::ErrorCode::Ok || !self.0.success {
+            let (message, file_path) = parse_info(&self.0.optim_info);
+            return Some(SlangError::OptimizationFailed {
+                code: self.0.optim_info.code,
+                message: if message.is_empty() {
+                    "Optimization failed".into()
+                } else {
+                    message
+                },
+                file_path,
+                line: self.0.optim_info.line,
+                column: self.0.optim_info.column,
+            });
+        }
 
-        let message = if info.message.is_null() {
-            "Unknown C++ compilation error".to_string()
-        } else {
-            unsafe { CStr::from_ptr(info.message) }
-                .to_string_lossy()
-                .into_owned()
-        };
-
-        let file_path = if info.file_path.is_null() {
-            String::new()
-        } else {
-            unsafe { CStr::from_ptr(info.file_path) }
-                .to_string_lossy()
-                .into_owned()
-        };
-
-        Some(SlangError::CompileFailed {
-            code: info.code,
-            message,
-            file_path,
-            line: info.line,
-            column: info.column,
-        })
+        None
     }
 }
 

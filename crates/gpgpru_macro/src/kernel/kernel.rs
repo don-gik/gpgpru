@@ -180,6 +180,7 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
     let entry_point_lit = args
         .entry_point
         .unwrap_or_else(|| syn::LitStr::new("main", args.slang_path.span()));
+    let high_precision = args.high_precision;
 
     let input_fn: syn::ItemFn = syn::parse2(body)?;
     let fn_name = &input_fn.sig.ident;
@@ -203,9 +204,13 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
         ));
     }
 
-    let reflection =
-        ShaderCache::get_or_compile(&fn_name.to_string(), &absolute_slang_path, &entry_point)
-            .map_err(|err| syn::Error::new(input_fn.sig.ident.span(), err))?;
+    let reflection = ShaderCache::get_or_compile(
+        &fn_name.to_string(),
+        &absolute_slang_path,
+        &entry_point,
+        high_precision,
+    )
+    .map_err(|err| syn::Error::new(input_fn.sig.ident.span(), err))?;
 
     let pc_resource = reflection.push_constant();
     let total_size = pc_resource.map(|r| r.total_size as usize).unwrap_or(0);
@@ -416,6 +421,7 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
             fn _use_types(#(_: #raw_arg_tys),*) {}
         };
 
+        #[allow(non_snake_case)]
         #fn_vis fn #fn_name<'a>(
             #(#fn_args),*
         ) -> gpgpru::__private::CommandBuilder<'a, impl gpgpru::__private::HazardTrace + Copy + 'static> {

@@ -3,7 +3,8 @@ name = "gpgpru_core"
 edition.workspace = true
 version.workspace = true
 description = "Core lib for gpgpru"
-publish = false
+license.workspace = true
+readme.workspace = true
 
 [dependencies]
 ash = { workspace = true }
