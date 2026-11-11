@@ -6,7 +6,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.3.3"
+version = "0.3.4"
 license = "AGPL-3.0-or-later"
 # repository = "https://github.com/don-gik/gpgpru"
 
@@ -16,8 +16,8 @@ syn = { version = "3.0.3", features = ["full", "extra-traits", "visit", "visit-m
 quote = "1.0.47"
 proc-macro2 = "1.0.107"
 
-gpgpru_core = { path = "crates/gpgpru_core", version = "0.3.3" }
-gpgpru_macro = { path = "crates/gpgpru_macro", version = "0.3.3" }
+gpgpru_core = { path = "crates/gpgpru_core", version = "0.3.4" }
+gpgpru_macro = { path = "crates/gpgpru_macro", version = "0.3.4" }
 
 [profile.dev]
 incremental = true
@@ -25,3 +25,7 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[profile.samply]
+inherits = "release"
+debug = true

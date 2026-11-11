@@ -1,11 +1,11 @@
 use gpgpru::config::{DeviceConfig, DeviceSelector};
+use gpgpru::utils::GpuTimer;
 use gpgpru::{Device, GpuSlice, Result, create_buffer, kernel, read_buffer};
-use std::time::Instant;
 
 #[kernel("examples/gemm.slang", "gemm")]
 fn gemm(
-    A: &mut GpuSlice<f32>,
-    B: &mut GpuSlice<f32>,
+    A: &GpuSlice<f32>,
+    B: &GpuSlice<f32>,
     C: &mut GpuSlice<f32>,
     M: u32,
     N: u32,
@@ -28,29 +28,32 @@ fn main() -> Result<()> {
     let host_b = vec![2.0f32; (k * n) as usize];
     let mut host_c = vec![0.0f32; (m * n) as usize];
 
-    let mut buf_a = create_buffer(&host_a).with(&device)?;
-    let mut buf_b = create_buffer(&host_b).with(&device)?;
+    let buf_a = create_buffer(&host_a).with(&device)?;
+    let buf_b = create_buffer(&host_b).with(&device)?;
     let mut buf_c = create_buffer(&host_c).with(&device)?;
 
-    // Block dimensions for 128x64 tiling
-    let (bm, bn) = (128, 64);
+    // Block dimensions for 64x64 tiling
+    let (bm, bn) = (64, 64);
     let groups = ((n + bn - 1) / bn, (m + bm - 1) / bm, 1);
 
     // Warm-up pass
-    gemm(&mut buf_a, &mut buf_b, &mut buf_c, m, n, k, alpha, beta).queue(&device, groups)?;
-    device.wait_timeline(device.dispatch()?)?;
+    for _ in 0..10 {
+        gemm(&buf_a, &buf_b, &mut buf_c, m, n, k, alpha, beta).queue(&device, groups)?;
+        device.wait_timeline(device.dispatch()?)?;
+    }
 
     // Benchmark
-    let iterations = 100;
-    let start = Instant::now();
+    let timer = GpuTimer::new(&device)?;
 
-    for _ in 0..iterations {
-        gemm(&mut buf_a, &mut buf_b, &mut buf_c, m, n, k, alpha, beta).queue(&device, groups)?;
-    }
+    let s0 = timer.stamp(&device);
+    gemm(&buf_a, &buf_b, &mut buf_c, m, n, k, alpha, beta).queue(&device, groups)?;
+    let s1 = timer.stamp(&device);
     device.wait_timeline(device.dispatch()?)?;
 
     // Compute performance
-    let avg_dur = start.elapsed() / iterations;
+    let t0 = timer.fetch(&device, s0)?;
+    let t1 = timer.fetch(&device, s1)?;
+    let avg_dur = t1 - t0;
     let ops_per_gemm = 2.0 * (m as f64) * (n as f64) * (k as f64);
     let gflops = (ops_per_gemm / avg_dur.as_secs_f64()) / 1e9;
 

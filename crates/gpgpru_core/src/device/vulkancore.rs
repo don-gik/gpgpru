@@ -21,6 +21,8 @@ pub(crate) struct VulkanCore {
     pub(crate) physical_device: vk::PhysicalDevice,
     pub(crate) logical_device: LogicalDevice,
 
+    pub(crate) physical_device_props: vk::PhysicalDeviceProperties,
+
     pub(crate) compute_queue: Arc<Mutex<vk::Queue>>,
     pub(crate) compute_queue_family_index: u32,
 
@@ -45,8 +47,12 @@ impl VulkanCore {
         let debug_context = DebugContext::new(&entry, &instance)?;
 
         // Get physical device
-        let (physical_device, compute_queue_family_index, transfer_queue_family_index) =
-            Self::get_physical_device(&instance, device_selector)?;
+        let (
+            physical_device,
+            physical_device_props,
+            compute_queue_family_index,
+            transfer_queue_family_index,
+        ) = Self::get_physical_device(&instance, device_selector)?;
 
         // Get logical device & queues
         let (logical_device, compute_queue_handle, transfer_queue_handle) =
@@ -69,6 +75,7 @@ impl VulkanCore {
             instance,
             physical_device,
             logical_device,
+            physical_device_props,
             compute_queue,
             compute_queue_family_index,
             _transfer_queue,
@@ -118,7 +125,7 @@ impl VulkanCore {
     fn get_physical_device(
         instance: &Instance,
         device_selector: DeviceSelector,
-    ) -> Result<(vk::PhysicalDevice, u32, u32)> {
+    ) -> Result<(vk::PhysicalDevice, vk::PhysicalDeviceProperties, u32, u32)> {
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
 
         if physical_devices.is_empty() {
@@ -198,7 +205,7 @@ impl VulkanCore {
             let score = Self::calculate_device_score(device_selector, &props);
             if score > max_score {
                 max_score = score;
-                best_device = Some((pdevice, compute_idx, transfer_idx));
+                best_device = Some((pdevice, props, compute_idx, transfer_idx));
             }
         }
 
