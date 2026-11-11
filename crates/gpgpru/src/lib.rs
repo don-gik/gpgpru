@@ -15,5 +15,6 @@ pub mod config {
 
 #[doc(hidden)]
 pub mod __private {
+    pub use bytemuck;
     pub use gpgpru_core::__private::{AccessType, CommandBuilder, HazardTrace, Task};
 }

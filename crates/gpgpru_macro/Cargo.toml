@@ -10,9 +10,9 @@ readme.workspace = true
 proc-macro = true
 
 [dependencies]
-syn = { workspace = true }
-quote = { workspace = true }
-proc-macro2 = { workspace = true }
+syn = { version = "3.0.3", features = ["full", "extra-traits", "visit", "visit-mut"] }
+quote = "1.0.47"
+proc-macro2 = "1.0.107"
 serde_json = "1.0.154"
 thiserror = "2.0.21"
 rustc-hash = "2.1.3"

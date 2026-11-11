@@ -7,8 +7,8 @@ license.workspace = true
 readme.workspace = true
 
 [dependencies]
-ash = { workspace = true }
-bytemuck = "1.25.2"
+ash = "0.38.0"
+bytemuck.workspace = true
 crossbeam-channel = "0.5.17"
 crossbeam-queue = "0.3.13"
 dashmap = "6.2.1"
