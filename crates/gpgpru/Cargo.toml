@@ -7,6 +7,6 @@ license.workspace = true
 readme.workspace = true
 
 [dependencies]
-bytemuck = "1.25.2"
+bytemuck.workspace = true
 gpgpru_core.workspace = true
 gpgpru_macro.workspace = true

@@ -11,10 +11,7 @@ license = "AGPL-3.0-or-later"
 # repository = "https://github.com/don-gik/gpgpru"
 
 [workspace.dependencies]
-ash = "0.38.0"
-syn = { version = "3.0.3", features = ["full", "extra-traits", "visit", "visit-mut"] }
-quote = "1.0.47"
-proc-macro2 = "1.0.107"
+bytemuck = "1.25.2"
 
 gpgpru_core = { path = "crates/gpgpru_core", version = "0.3.4" }
 gpgpru_macro = { path = "crates/gpgpru_macro", version = "0.3.4" }
