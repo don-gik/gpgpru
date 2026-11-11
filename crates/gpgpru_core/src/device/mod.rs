@@ -6,6 +6,7 @@ mod debug;
 pub mod dma;
 mod garbage;
 mod pipeline;
+pub mod utils;
 mod vulkancore;
 
 pub use command::{CommandBuilder, IntoWorkgroup, Task};
@@ -30,9 +31,10 @@ use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use smallvec::{SmallVec, smallvec};
+use std::cell::Cell;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub(crate) struct SharedContext {
     pub(crate) core: Arc<VulkanCore>,
@@ -167,6 +169,17 @@ impl Device {
         Ok(())
     }
 
+    pub fn dispatch(&self) -> Result<u64> {
+        self.shared.cmd_manager.dispatch(
+            &self.shared.pipeline,
+            &self.shared.gc,
+            &self.shared.allocator,
+            &self.shared.page_tracker,
+        )
+    }
+}
+
+impl Device {
     pub(crate) fn get_pipeline<'a>(
         &self,
         spirv_code: &'a [u32],
@@ -182,13 +195,49 @@ impl Device {
         self.shared.cmd_manager.push(task);
     }
 
-    pub fn dispatch(&self) -> Result<u64> {
-        self.shared.cmd_manager.dispatch(
-            &self.shared.pipeline,
-            &self.shared.gc,
-            &self.shared.allocator,
-            &self.shared.page_tracker,
-        )
+    pub(crate) fn create_query_pool(&self, size: u32) -> Result<vk::QueryPool> {
+        let create_info = &vk::QueryPoolCreateInfo::default()
+            .query_count(size)
+            .query_type(vk::QueryType::TIMESTAMP);
+        let raw_query_pool = unsafe {
+            self.shared
+                .core
+                .logical_device
+                .create_query_pool(create_info, None)?
+        };
+        unsafe {
+            self.shared
+                .core
+                .logical_device
+                .reset_query_pool(raw_query_pool, 0, size);
+        };
+        Ok(raw_query_pool)
+    }
+
+    #[inline]
+    pub(crate) fn timestamp_period(&self) -> f32 {
+        self.shared
+            .core
+            .physical_device_props
+            .limits
+            .timestamp_period
+    }
+
+    pub(crate) fn get_query_pool_result(
+        &self,
+        query_pool: vk::QueryPool,
+        index: u32,
+    ) -> Result<u64> {
+        let mut timestamp = 0u64;
+        unsafe {
+            self.shared.core.logical_device.get_query_pool_results(
+                query_pool,
+                index,
+                std::slice::from_mut(&mut timestamp),
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+            )?;
+        }
+        Ok(timestamp)
     }
 }
 

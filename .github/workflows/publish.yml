@@ -17,16 +17,14 @@ jobs:
           submodules: recursive
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Install Vulkan SDK and SPIRV-Tools
-        uses: humbletim/setup-vulkan-sdk@v1.2.1
-        with:
-          vulkan-query-version: 1.4.304.1
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Tools
-          vulkan-use-cache: true
+      - name: Install SPIRV-Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y spirv-tools spirv-tools-dev spirv-headers libvulkan-dev
       - name: Publish
         run: cargo publish --workspace
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_API_KEY }}
-          CPATH: "${{ env.VULKAN_SDK }}/include"
-          LIBRARY_PATH: "${{ env.VULKAN_SDK }}/lib"
-          CMAKE_PREFIX_PATH: "${{ env.VULKAN_SDK }}"
+          CMAKE_PREFIX_PATH: "/usr/lib/x86_64-linux-gnu/cmake/SPIRV-Tools:/usr/lib/x86_64-linux-gnu"
+          CPATH: "/usr/include"
+          LIBRARY_PATH: "/usr/lib/x86_64-linux-gnu"

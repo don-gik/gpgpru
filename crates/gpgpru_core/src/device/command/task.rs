@@ -31,6 +31,10 @@ pub(crate) enum TaskPayload {
         dispatch_size: (u32, u32, u32),
     },
     Transfer(DmaOp),
+    Timestamp {
+        query_pool: vk::QueryPool,
+        query_index: u32,
+    },
 }
 
 #[derive(Debug)]
@@ -68,13 +72,21 @@ impl Task {
                 dispatch_size,
             },
             target_epoch: 0,
-            hazards: HazardResult {
-                need_barrier: false,
-                src_access: vk::AccessFlags2::empty(),
-                dst_access: vk::AccessFlags2::empty(),
-                deps: SmallVec::new(),
-            },
+            hazards: HazardResult::default(),
             has_write: true,
+        }
+    }
+
+    /// Create timestamp task
+    pub fn new_timestamp(query_pool: vk::QueryPool, query_index: u32) -> Self {
+        Self {
+            payload: TaskPayload::Timestamp {
+                query_pool,
+                query_index,
+            },
+            target_epoch: 0,
+            hazards: HazardResult::default(),
+            has_write: false,
         }
     }
 
@@ -97,6 +109,7 @@ impl Task {
         match &self.payload {
             TaskPayload::Compute { pipeline_id, .. } => BatchKind::Compute(*pipeline_id),
             TaskPayload::Transfer(_) => BatchKind::Transfer,
+            TaskPayload::Timestamp { .. } => BatchKind::Timestamp,
         }
     }
 
@@ -107,7 +120,7 @@ impl Task {
                 push_constants_size,
                 ..
             } => *push_constants_size,
-            TaskPayload::Transfer(_) => 0,
+            TaskPayload::Transfer(_) | TaskPayload::Timestamp { .. } => 0,
         }
     }
 }

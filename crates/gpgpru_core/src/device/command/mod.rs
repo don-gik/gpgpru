@@ -1,9 +1,11 @@
 mod command;
 mod queue;
+mod scratch;
 mod task;
 
 pub use command::*;
 use queue::*;
+use scratch::*;
 pub use task::*;
 
 use super::*;
@@ -81,24 +83,22 @@ impl CommandManager {
         self.task_queue.push_task(task);
     }
 
-    fn record_post_task_barriers(&self, cmd_buffer: ash::vk::CommandBuffer, task: &Task) {
-        if task.has_write {
-            let post_barrier = vk::MemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                .src_access_mask(vk::AccessFlags2::SHADER_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-                .dst_access_mask(vk::AccessFlags2::HOST_READ);
+    // fn record_post_task_barriers(&self, cmd_buffer: ash::vk::CommandBuffer, task: &Task) {
+    //     if task.has_write {
+    //         let post_barrier = vk::MemoryBarrier2::default()
+    //             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+    //             .src_access_mask(vk::AccessFlags2::SHADER_WRITE);
 
-            let dependency_info =
-                vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&post_barrier));
+    //         let dependency_info =
+    //             vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&post_barrier));
 
-            unsafe {
-                self.core
-                    .logical_device
-                    .cmd_pipeline_barrier2(cmd_buffer, &dependency_info);
-            }
-        }
-    }
+    //         unsafe {
+    //             self.core
+    //                 .logical_device
+    //                 .cmd_pipeline_barrier2(cmd_buffer, &dependency_info);
+    //         }
+    //     }
+    // }
 
     pub(crate) fn dispatch(
         &self,
@@ -189,6 +189,7 @@ impl CommandManager {
                     dst_stage = match batch.kind {
                         BatchKind::Compute(_) => vk::PipelineStageFlags2::COMPUTE_SHADER,
                         BatchKind::Transfer => vk::PipelineStageFlags2::TRANSFER,
+                        BatchKind::Timestamp => vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
                     };
                 }
 
@@ -257,7 +258,7 @@ impl CommandManager {
                             }
                         }
 
-                        self.record_post_task_barriers(cmd_buffer, task);
+                        // self.record_post_task_barriers(cmd_buffer, task);
                     }
                 }
 
@@ -313,6 +314,26 @@ impl CommandManager {
                                         data,
                                     );
                                 },
+                            }
+                        }
+                    }
+                }
+
+                // Lightweight timestamping only.
+                BatchKind::Timestamp => {
+                    for task in &batch.tasks {
+                        if let TaskPayload::Timestamp {
+                            query_pool,
+                            query_index,
+                        } = &task.payload
+                        {
+                            unsafe {
+                                self.core.logical_device.cmd_write_timestamp2(
+                                    cmd_buffer,
+                                    vk::PipelineStageFlags2::COMPUTE_SHADER,
+                                    *query_pool,
+                                    *query_index,
+                                );
                             }
                         }
                     }
