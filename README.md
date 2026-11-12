@@ -5,11 +5,11 @@ It is lightweight and uses vulkan as backend.
 
 ## Benchmark
 
-A basic benchmark tuned to Intel Iris Xe is available through : 
+A basic benchmark, now naively implemented is below:
 ```bash
 cargo run --example gemm -p gpgpru --release
 ```
-It outputs 850GFLOPS on average, for Intel Iris Xe, which is 42.6% of theoretical performance. May work better on dGPUs.
+It is currently very slow due to not CPU overhead but GPU kernel optimization.
 
 ## Troubleshooting
 

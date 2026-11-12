@@ -174,6 +174,34 @@ fn extract_bda_element_type(ty: &syn::Type) -> syn::Result<syn::Type> {
     ))
 }
 
+fn parse_raw_attr(attrs: &[syn::Attribute]) -> syn::Result<bool> {
+    let mut is_raw = false;
+
+    for attr in attrs {
+        let path = attr.path();
+        let matched = path.is_ident("raw")
+            || (path.segments.len() == 2
+                && path.segments[0].ident == "gpgpru"
+                && path.segments[1].ident == "raw");
+
+        if !matched {
+            continue;
+        }
+
+        // #[raw]
+        if !matches!(attr.meta, syn::Meta::Path(_)) {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "`#[raw]` does not accept any arguments.",
+            ));
+        }
+
+        is_raw = true;
+    }
+
+    Ok(is_raw)
+}
+
 pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenStream2> {
     let args: KernelArgs = syn::parse2(attr)?;
     let slang_path_str = args.slang_path.value();
@@ -183,6 +211,7 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
     let high_precision = args.high_precision;
 
     let input_fn: syn::ItemFn = syn::parse2(body)?;
+    let kernel_is_raw = parse_raw_attr(&input_fn.attrs)?;
     let fn_name = &input_fn.sig.ident;
     let fn_vis = &input_fn.vis;
 
@@ -254,33 +283,13 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
         let offset = member.offset as usize;
         let slang_size = member.size as usize;
 
+        let is_raw = kernel_is_raw || parse_raw_attr(&pat_type.attrs)?;
+
         match member.kind {
             // --------------------------------------------------------------------------
-            // A. BDA Pointer (&impl AsGpuBuffer<T> / &mut impl AsGpuBuffer<T>)
+            // A. BDA Pointer (&impl AsGpuBuffer<T> / &mut impl AsGpuBuffer<T> / #[raw] u64)
             // --------------------------------------------------------------------------
             raw::MemberKind::Pointer => {
-                let syn::Type::Reference(type_ref) = &**arg_ty else {
-                    return Err(syn::Error::new_spanned(
-                        arg_ty,
-                        format!("BDA argument '{arg_str}' must be a reference (& or &mut)."),
-                    ));
-                };
-
-                let inner_ty = extract_bda_element_type(arg_ty)?;
-                let is_mut = type_ref.mutability.is_some();
-
-                let bda_size_field = quote::format_ident!("bda_size_{}", bda_count);
-                bda_count += 1;
-
-                let transformed_arg_ty = apply_lifetime_to_mut_refs(arg_ty, "'a");
-
-                fn_args.push(quote::quote! {
-                    #arg_name: #transformed_arg_ty
-                });
-
-                params_fields.push(quote::quote! { #bda_size_field: u64 });
-                params_inits.push(quote::quote! { #bda_size_field: #arg_name.size() });
-
                 const_asserts.push(quote::quote! {
                     assert!(
                         8 == #slang_size,
@@ -288,107 +297,140 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
                     );
                 });
 
-                for child in reflection.child_members(member_idx as i32) {
-                    let child_ident = quote::format_ident!("{}", child.name);
-                    let expected_offset = child.offset as usize;
-
-                    const_asserts.push(quote::quote! {
-                        assert!(
-                            ::core::mem::offset_of!(#inner_ty, #child_ident) == #expected_offset,
-                            concat!(
-                                "Field '", stringify!(#child_ident),
-                                "' of BDA Struct '", stringify!(#inner_ty),
-                                "' has different offset with slang shader (", #expected_offset, "B)."
-                            )
-                        );
-                    });
-                }
-
                 let end = offset + 8;
-                param_copies.push(quote::quote! {
-                    let bda_val = #arg_name.bda();
-                    ___push_constant_bytes[#offset..#end].copy_from_slice(&bda_val.to_ne_bytes());
-                });
 
-                let access = if is_mut {
-                    quote::quote! { gpgpru::__private::AccessType::Write }
+                let is_raw_u64 = is_raw
+                    && matches!(
+                        &**arg_ty,
+                        syn::Type::Path(p) if p.path.is_ident("u64")
+                    );
+
+                if is_raw_u64 {
+                    fn_args.push(quote::quote! { #arg_name: u64 });
+
+                    param_copies.push(quote::quote! {
+                                ___push_constant_bytes[#offset..#end].copy_from_slice(&#arg_name.to_ne_bytes());
+                            });
                 } else {
-                    quote::quote! { gpgpru::__private::AccessType::Read }
-                };
+                    let syn::Type::Reference(type_ref) = &**arg_ty else {
+                        return Err(syn::Error::new_spanned(
+                            arg_ty,
+                            format!("BDA argument '{arg_str}' must be a reference (& or &mut)."),
+                        ));
+                    };
 
-                hazard_traces.push(quote::quote! {
-                    let bda = u64::from_ne_bytes(self.raw[#offset..#end].try_into().unwrap());
-                    visitor(bda, self.#bda_size_field, #access);
-                });
+                    let is_mut = type_ref.mutability.is_some();
+
+                    let bda_size_field = quote::format_ident!("bda_size_{}", bda_count);
+                    bda_count += 1;
+
+                    let transformed_arg_ty = apply_lifetime_to_mut_refs(arg_ty, "'a");
+
+                    fn_args.push(quote::quote! {
+                        #arg_name: #transformed_arg_ty
+                    });
+
+                    params_fields.push(quote::quote! { #bda_size_field: u64 });
+                    params_inits.push(quote::quote! { #bda_size_field: #arg_name.size() });
+
+                    // not #[raw]
+                    if !is_raw {
+                        let inner_ty = extract_bda_element_type(arg_ty)?;
+
+                        for child in reflection.child_members(member_idx as i32) {
+                            let child_ident = quote::format_ident!("{}", child.name);
+                            let expected_offset = child.offset as usize;
+
+                            const_asserts.push(quote::quote! {
+                                        assert!(
+                                            ::core::mem::offset_of!(#inner_ty, #child_ident) == #expected_offset,
+                                            concat!(
+                                                "Field '", stringify!(#child_ident),
+                                                "' of BDA Struct '", stringify!(#inner_ty),
+                                                "' has different offset with slang shader (", #expected_offset, "B)."
+                                            )
+                                        );
+                                    });
+                        }
+                    }
+
+                    param_copies.push(quote::quote! {
+                                let bda_val = #arg_name.bda();
+                                ___push_constant_bytes[#offset..#end].copy_from_slice(&bda_val.to_ne_bytes());
+                            });
+
+                    let access = if is_mut {
+                        quote::quote! { gpgpru::__private::AccessType::Write }
+                    } else {
+                        quote::quote! { gpgpru::__private::AccessType::Read }
+                    };
+
+                    hazard_traces.push(quote::quote! {
+                        let bda = u64::from_ne_bytes(self.raw[#offset..#end].try_into().unwrap());
+                        visitor(bda, self.#bda_size_field, #access);
+                    });
+                }
             }
 
             // --------------------------------------------------------------------------
-            // B. User-defined Struct (Direct Struct)
+            // B. User-defined Struct & C. Primitive Scalar / Matrix
             // --------------------------------------------------------------------------
-            raw::MemberKind::Struct => {
+            raw::MemberKind::Struct | raw::MemberKind::Primitive => {
                 fn_args.push(quote::quote! { #arg_name: #arg_ty });
 
-                // Size validation
-                const_asserts.push(quote::quote! {
-                    assert!(
-                        ::core::mem::size_of::<#arg_ty>() == #slang_size,
-                        concat!(
-                            "Struct '", stringify!(#arg_ty),
-                            "' size mismatch with Slang shader (expected ", #slang_size, "B)."
-                        )
-                    );
-                });
-
-                // Field validation
-                for child in reflection.child_members(member_idx as i32) {
-                    let child_ident = quote::format_ident!("{}", child.name);
-                    let expected_offset = child.offset as usize;
+                if !is_raw {
+                    if matches!(member.kind, raw::MemberKind::Primitive) {
+                        verify_primitive_or_math_type(arg_ty, member, arg_name.span())?;
+                    }
 
                     const_asserts.push(quote::quote! {
                         assert!(
-                            ::core::mem::offset_of!(#arg_ty, #child_ident) == #expected_offset,
+                            ::core::mem::size_of::<#arg_ty>() == #slang_size,
                             concat!(
-                                "Field '", stringify!(#child_ident),
-                                "' of Struct '", stringify!(#arg_ty),
-                                "' has different offset with slang shader (", #expected_offset, "B)."
+                                "Type '", stringify!(#arg_ty),
+                                "' size mismatch with Slang shader (expected ", #slang_size, "B)."
                             )
                         );
                     });
+
+                    if matches!(member.kind, raw::MemberKind::Struct) {
+                        for child in reflection.child_members(member_idx as i32) {
+                            let child_ident = quote::format_ident!("{}", child.name);
+                            let expected_offset = child.offset as usize;
+
+                            const_asserts.push(quote::quote! {
+                                        assert!(
+                                            ::core::mem::offset_of!(#arg_ty, #child_ident) == #expected_offset,
+                                            concat!(
+                                                "Field '", stringify!(#child_ident),
+                                                "' of Struct '", stringify!(#arg_ty),
+                                                "' has different offset with slang shader (", #expected_offset, "B)."
+                                            )
+                                        );
+                                    });
+                        }
+                    }
+
+                    // Normal: bytemuck Zero-Copy
+                    param_copies.push(quote::quote! {
+                        let bytes = gpgpru::__private::bytemuck::bytes_of(&#arg_name);
+                        let end = #offset + bytes.len();
+                        ___push_constant_bytes[#offset..end].copy_from_slice(bytes);
+                    });
+                } else {
+                    // #[raw]: Raw byte copy
+                    param_copies.push(quote::quote! {
+                                let raw_bytes = unsafe {
+                                    ::core::slice::from_raw_parts(
+                                        (&#arg_name as *const _).cast::<u8>(),
+                                        ::core::mem::size_of_val(&#arg_name),
+                                    )
+                                };
+                                let copy_len = raw_bytes.len().min(#slang_size);
+                                let end = #offset + copy_len;
+                                ___push_constant_bytes[#offset..end].copy_from_slice(&raw_bytes[..copy_len]);
+                            });
                 }
-
-                // 3) bytemuck Zero-Copy
-                param_copies.push(quote::quote! {
-                    let struct_bytes = ::bytemuck::bytes_of(&#arg_name);
-                    let end = #offset + struct_bytes.len();
-                    ___push_constant_bytes[#offset..end].copy_from_slice(struct_bytes);
-                });
-            }
-
-            // --------------------------------------------------------------------------
-            // C. Primitive Scalar / Matrix (f32, u32, Mat4, etc.)
-            // --------------------------------------------------------------------------
-            raw::MemberKind::Primitive => {
-                fn_args.push(quote::quote! { #arg_name: #arg_ty });
-
-                verify_primitive_or_math_type(arg_ty, member, arg_name.span())?;
-
-                // Size validation
-                const_asserts.push(quote::quote! {
-                    assert!(
-                        ::core::mem::size_of::<#arg_ty>() == #slang_size,
-                        concat!(
-                            "Primitive type '", stringify!(#arg_ty),
-                            "' size mismatch with Slang shader (expected ", #slang_size, "B)."
-                        )
-                    );
-                });
-
-                // bytemuck Zero-Copy
-                param_copies.push(quote::quote! {
-                    let scalar_bytes = gpgpru::__private::bytemuck::bytes_of(&#arg_name);
-                    let end = #offset + scalar_bytes.len();
-                    ___push_constant_bytes[#offset..end].copy_from_slice(scalar_bytes);
-                });
             }
         }
     }
