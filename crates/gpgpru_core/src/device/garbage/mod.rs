@@ -14,6 +14,7 @@ pub(crate) trait Dispose {
 
 pub(crate) enum Collectable {
     Buffer(BufferTrash),
+    QueryPool(QueryPoolTrash),
 }
 
 impl Collectable {
@@ -26,6 +27,7 @@ impl Collectable {
     ) {
         match self {
             Self::Buffer(trash) => trash.dispose(device, allocator, page_tracker),
+            Self::QueryPool(trash) => trash.dispose(device, allocator, page_tracker),
         }
     }
 }

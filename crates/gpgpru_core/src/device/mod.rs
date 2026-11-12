@@ -18,6 +18,7 @@ pub(crate) use allocator::*;
 pub(crate) use command::{CommandManager, DmaOp, TaskPayload};
 pub(crate) use garbage::*;
 pub(crate) use pipeline::*;
+pub(crate) use utils::*;
 pub(crate) use vulkancore::VulkanCore;
 
 // Use crate modules

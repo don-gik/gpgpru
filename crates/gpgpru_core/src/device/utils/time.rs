@@ -27,6 +27,7 @@ pub struct GpuTimer<const N: usize = 2> {
     query_pool: vk::QueryPool,
     timestamp_period: f32,
     next_slot: AtomicU32,
+    shared: Arc<SharedContext>,
 }
 
 impl GpuTimer<2> {
@@ -42,6 +43,7 @@ impl<const N: usize> GpuTimer<N> {
             query_pool,
             timestamp_period: device.timestamp_period(),
             next_slot: AtomicU32::new(0),
+            shared: device.shared.clone(),
         })
     }
 
@@ -57,5 +59,41 @@ impl<const N: usize> GpuTimer<N> {
             ticks,
             period_ns: self.timestamp_period,
         })
+    }
+}
+
+impl<const N: usize> Drop for GpuTimer<N> {
+    fn drop(&mut self) {
+        let target_timeline = self
+            .shared
+            .cmd_manager
+            .next_semaphore_value
+            .load(Ordering::Acquire);
+
+        self.shared.gc.push(
+            target_timeline,
+            Collectable::QueryPool(QueryPoolTrash {
+                query_pool: self.query_pool,
+            }),
+        );
+    }
+}
+
+// ------------------------------------------
+
+pub(crate) struct QueryPoolTrash {
+    pub(crate) query_pool: vk::QueryPool,
+}
+
+impl Dispose for QueryPoolTrash {
+    fn dispose(
+        self,
+        device: &LogicalDevice,
+        _allocator: &AllocationManager,
+        _page_tracker: &PageTracker,
+    ) {
+        unsafe {
+            device.destroy_query_pool(self.query_pool, None);
+        }
     }
 }
