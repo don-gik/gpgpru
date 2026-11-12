@@ -6,15 +6,15 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.3.5"
+version = "0.3.6"
 license = "AGPL-3.0-or-later"
 # repository = "https://github.com/don-gik/gpgpru"
 
 [workspace.dependencies]
 bytemuck = "1.25.2"
 
-gpgpru_core = { path = "crates/gpgpru_core", version = "0.3.5" }
-gpgpru_macro = { path = "crates/gpgpru_macro", version = "0.3.5" }
+gpgpru_core = { path = "crates/gpgpru_core", version = "0.3.6" }
+gpgpru_macro = { path = "crates/gpgpru_macro", version = "0.3.6" }
 
 [profile.dev]
 incremental = true

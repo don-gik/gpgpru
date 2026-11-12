@@ -14,3 +14,8 @@ pub fn kernel(attr: TokenStream, body: TokenStream) -> TokenStream {
         Err(err) => err.to_compile_error().into(),
     }
 }
+
+#[proc_macro_attribute]
+pub fn raw(_attr: TokenStream, body: TokenStream) -> TokenStream {
+    body
+}

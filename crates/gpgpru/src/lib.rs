@@ -2,7 +2,7 @@ pub use gpgpru_core::dma;
 pub use gpgpru_core::utils;
 pub use gpgpru_core::{Device, GpuError, Result};
 pub use gpgpru_core::{GpuBuffer, GpuSlice, create_buffer, read_buffer, write_buffer};
-pub use gpgpru_macro::kernel;
+pub use gpgpru_macro::{kernel, raw};
 
 pub mod prelude {
     pub use gpgpru_core::IntoWorkgroup;
