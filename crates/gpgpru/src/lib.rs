@@ -12,6 +12,7 @@ pub mod prelude {
 }
 
 pub mod config {
+    pub use gpgpru_core::SlangProfile;
     pub use gpgpru_core::{DeviceConfig, DeviceSelector};
 }
 

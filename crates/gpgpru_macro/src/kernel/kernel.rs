@@ -53,22 +53,37 @@ fn parse_raw_attr(attrs: &[syn::Attribute]) -> syn::Result<bool> {
     Ok(is_raw)
 }
 
-fn format_concise_slang_warning(slang_path: &str, raw_warning: &str) -> String {
-    let summaries: Vec<&str> = raw_warning
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("warning[") || line.starts_with("warning:"))
-        .collect();
-
-    if summaries.is_empty() {
-        format!(
-            "\x1b[33mwarning[slang]\x1b[0m ({slang_path}): {}",
-            raw_warning.trim()
-        )
+fn format_slang_warnings(raw_warning: &str) -> String {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let prefix_with_slash = if manifest_dir.is_empty() {
+        String::new()
     } else {
-        let joined = summaries.join("\n  ");
-        format!("\x1b[33mwarning[slang]\x1b[0m ({slang_path}):\n  {joined}")
-    }
+        format!("{}/", manifest_dir.trim_end_matches('/'))
+    };
+
+    raw_warning
+        .trim()
+        .lines()
+        .map(|line| {
+            let cleaned = if !prefix_with_slash.is_empty() {
+                line.replace(&prefix_with_slash, "")
+            } else {
+                line.to_string()
+            };
+
+            let trimmed = cleaned.trim_start();
+            if trimmed.starts_with("warning[") || trimmed.starts_with("warning:") {
+                let indent = &cleaned[..cleaned.len() - trimmed.len()];
+                format!("{indent}\x1b[1;33m{trimmed}\x1b[0m")
+            } else if trimmed.starts_with("note[") || trimmed.starts_with("note:") {
+                let indent = &cleaned[..cleaned.len() - trimmed.len()];
+                format!("{indent}\x1b[1;36m{trimmed}\x1b[0m")
+            } else {
+                cleaned
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenStream2> {
@@ -124,7 +139,7 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
 
     if let Some(w) = &reflection.warnings {
         if !w.trim().is_empty() {
-            eprintln!("{}", format_concise_slang_warning(&slang_path_str, w));
+            eprintln!("{}\n", format_slang_warnings(w));
         }
     }
 
