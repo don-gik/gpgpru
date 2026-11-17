@@ -1,4 +1,7 @@
+use super::*;
+
 pub mod raw {
+    use super::*;
     use serde::{Deserialize, Serialize};
     use std::ffi::c_char;
 
@@ -96,6 +99,7 @@ pub mod raw {
         pub success: bool,
         pub error_info: ErrorInfo,
         pub optim_info: ErrorInfo,
+        pub warning_message: *const c_char,
 
         pub code_bytes: *const u8,
         pub code_size: usize,
@@ -119,6 +123,8 @@ pub mod raw {
             module_name: *const c_char,
             module_path: *const c_char,
             entry_point: *const c_char,
+            profiles: *const SlangProfile,
+            profile_count: usize,
             should_optimize: bool,
             high_prevision: bool,
         ) -> CompileResult;
@@ -175,11 +181,18 @@ impl ShaderContext {
         module_name: &str,
         path: &str,
         entry: &str,
+        profiles: &[SlangProfile],
         high_precision: bool,
     ) -> Result<SafeCompileResult, SlangError> {
         let raw_module_name = CString::new(module_name)?;
         let raw_path = CString::new(path)?;
         let raw_entry = CString::new(entry)?;
+
+        let profiles_ptr = if profiles.is_empty() {
+            std::ptr::null()
+        } else {
+            profiles.as_ptr()
+        };
 
         let raw_result = unsafe {
             raw::shadertool_compile_shader(
@@ -187,6 +200,8 @@ impl ShaderContext {
                 raw_module_name.as_ptr(),
                 raw_path.as_ptr(),
                 raw_entry.as_ptr(),
+                profiles_ptr,
+                profiles.len(),
                 !Self::is_opt_level_zero(),
                 high_precision,
             )
@@ -223,7 +238,7 @@ impl Drop for ShaderContext {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SafeCompileResult(pub(crate) raw::CompileResult);
 
 impl SafeCompileResult {
@@ -264,6 +279,18 @@ impl SafeCompileResult {
             ptr: self.0.resources,
             _marker: PhantomData,
         }
+    }
+
+    pub fn warning_message(&self) -> Option<String> {
+        if self.0.warning_message.is_null() {
+            return None;
+        }
+
+        let msg = unsafe { CStr::from_ptr(self.0.warning_message) }
+            .to_string_lossy()
+            .into_owned();
+
+        if msg.is_empty() { None } else { Some(msg) }
     }
 
     pub fn to_error(&self) -> Option<SlangError> {

@@ -12,7 +12,7 @@ use ash::vk;
 
 pub use buffer::linear::{GpuBuffer, GpuSlice, create_buffer, read_buffer, write_buffer};
 pub use buffer::{CpuToGpu, GpuOnly, GpuToCpu, Shared};
-pub use device::{Device, DeviceConfig, DeviceSelector, IntoWorkgroup};
+pub use device::{Device, DeviceConfig, DeviceSelector, IntoWorkgroup, SlangProfile};
 pub use device::{dma, utils};
 pub use error::{GpuError, Result};
 

@@ -25,155 +25,6 @@ fn apply_lifetime_to_mut_refs(ty: &syn::Type, lifetime_str: &str) -> syn::Type {
     cloned_ty
 }
 
-fn parse_rust_math_type(ty: &syn::Type) -> Option<(raw::ScalarKind, u8, u8)> {
-    match ty {
-        // [T; N] Array (e.g. [f32; 3])
-        syn::Type::Array(arr) => {
-            let (scalar, r, c) = parse_rust_math_type(&arr.elem)?;
-            if let syn::Expr::Lit(lit) = &arr.len {
-                if let syn::Lit::Int(lit_int) = &lit.lit {
-                    let len: u8 = lit_int.base10_parse().ok()?;
-                    return Some((scalar, r, c * len));
-                }
-            }
-            None
-        }
-
-        // Ident / Path (f32, glam::Vec3, Mat4 etc.)
-        syn::Type::Path(type_path) => {
-            let ident = type_path.path.segments.last()?.ident.to_string();
-            match ident.as_str() {
-                // Scalar
-                "f32" => Some((raw::ScalarKind::Float32, 1, 1)),
-                "u32" => Some((raw::ScalarKind::UInt32, 1, 1)),
-                "i32" => Some((raw::ScalarKind::Int32, 1, 1)),
-                "f64" => Some((raw::ScalarKind::Float64, 1, 1)),
-                "u64" => Some((raw::ScalarKind::UInt64, 1, 1)),
-                "i64" => Some((raw::ScalarKind::Int64, 1, 1)),
-                "bool" => Some((raw::ScalarKind::Bool, 1, 1)),
-
-                // Float Vectors (glam, nalgebra, cgmath, mint)
-                "Vec2" | "Point2" => Some((raw::ScalarKind::Float32, 1, 2)),
-                "Vec3" | "Point3" | "Vec3A" => Some((raw::ScalarKind::Float32, 1, 3)),
-                "Vec4" | "Point4" | "Quat" => Some((raw::ScalarKind::Float32, 1, 4)),
-
-                // Uint Vectors
-                "UVec2" => Some((raw::ScalarKind::UInt32, 1, 2)),
-                "UVec3" => Some((raw::ScalarKind::UInt32, 1, 3)),
-                "UVec4" => Some((raw::ScalarKind::UInt32, 1, 4)),
-
-                // Int Vectors
-                "IVec2" => Some((raw::ScalarKind::Int32, 1, 2)),
-                "IVec3" => Some((raw::ScalarKind::Int32, 1, 3)),
-                "IVec4" => Some((raw::ScalarKind::Int32, 1, 4)),
-
-                // Bool Vectors
-                "BVec2" => Some((raw::ScalarKind::Bool, 1, 2)),
-                "BVec3" => Some((raw::ScalarKind::Bool, 1, 3)),
-                "BVec4" => Some((raw::ScalarKind::Bool, 1, 4)),
-
-                // Matrices
-                "Mat2" => Some((raw::ScalarKind::Float32, 2, 2)),
-                "Mat3" => Some((raw::ScalarKind::Float32, 3, 3)),
-                "Mat4" => Some((raw::ScalarKind::Float32, 4, 4)),
-
-                _ => None, // Else, just pass em.
-            }
-        }
-        _ => None,
-    }
-}
-
-fn verify_primitive_or_math_type(
-    ty: &syn::Type,
-    member: &CachedMember,
-    arg_span: proc_macro2::Span,
-) -> syn::Result<()> {
-    let Some((rust_scalar, rust_rows, rust_cols)) = parse_rust_math_type(ty) else {
-        return Ok(()); // Custom (or complex slang structs) are passed (size_of)
-    };
-
-    let slang_scalar = member.scalar_type;
-    let slang_rows = member.row_count.max(1);
-    let slang_cols = member.col_count.max(1);
-
-    // 1. Scalar element type (Float32 vs Uint32 vs Int32)
-    if rust_scalar != slang_scalar {
-        return Err(syn::Error::new(
-            arg_span,
-            format!(
-                "Type scalar mismatch for field '{}': Rust uses '{:?}', but Slang shader expects '{:?}'.",
-                member.name, rust_scalar, slang_scalar
-            ),
-        ));
-    }
-
-    // 2. Element dimension (Vector dim / Matrix size)
-    let rust_total_components = rust_rows * rust_cols;
-    let slang_total_components = slang_rows * slang_cols;
-
-    if rust_total_components != slang_total_components {
-        return Err(syn::Error::new(
-            arg_span,
-            format!(
-                "Dimension mismatch for field '{}': Rust definition has {} components, but Slang shader expects {} ({}x{}).",
-                member.name, rust_total_components, slang_total_components, slang_rows, slang_cols
-            ),
-        ));
-    }
-
-    Ok(())
-}
-
-fn extract_bda_element_type(ty: &syn::Type) -> syn::Result<syn::Type> {
-    let syn::Type::Reference(type_ref) = ty else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "BDA pointer must be in &, &mut reference type.",
-        ));
-    };
-
-    let elem_ty = &*type_ref.elem;
-
-    match elem_ty {
-        // &impl AsGpuBuffer<T>
-        syn::Type::ImplTrait(impl_trait) => {
-            for bound in &impl_trait.bounds {
-                if let syn::TypeParamBound::Trait(tb) = bound {
-                    if let Some(segment) = tb.path.segments.last() {
-                        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                            if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                                return Ok(inner.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // &GpuBuffer<T>, &GpuBuffer<T, Loc>, &BufferSlice<'a, T, Loc> 등
-        syn::Type::Path(type_path) => {
-            if let Some(segment) = type_path.path.segments.last() {
-                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(inner) = args.args.iter().find_map(|arg| match arg {
-                        syn::GenericArgument::Type(t) => Some(t),
-                        _ => None,
-                    }) {
-                        return Ok(inner.clone());
-                    }
-                }
-            }
-        }
-        // &[T]
-        syn::Type::Slice(slice) => return Ok(*slice.elem.clone()),
-        _ => {}
-    }
-
-    Err(syn::Error::new_spanned(
-        ty,
-        "Cannot infer T from BDA Pointer (e.g. &GpuBuffer<Vertex> or &BufferSlice<Vertex>)",
-    ))
-}
-
 fn parse_raw_attr(attrs: &[syn::Attribute]) -> syn::Result<bool> {
     let mut is_raw = false;
 
@@ -202,6 +53,24 @@ fn parse_raw_attr(attrs: &[syn::Attribute]) -> syn::Result<bool> {
     Ok(is_raw)
 }
 
+fn format_concise_slang_warning(slang_path: &str, raw_warning: &str) -> String {
+    let summaries: Vec<&str> = raw_warning
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("warning[") || line.starts_with("warning:"))
+        .collect();
+
+    if summaries.is_empty() {
+        format!(
+            "\x1b[33mwarning[slang]\x1b[0m ({slang_path}): {}",
+            raw_warning.trim()
+        )
+    } else {
+        let joined = summaries.join("\n  ");
+        format!("\x1b[33mwarning[slang]\x1b[0m ({slang_path}):\n  {joined}")
+    }
+}
+
 pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenStream2> {
     let args: KernelArgs = syn::parse2(attr)?;
     let slang_path_str = args.slang_path.value();
@@ -209,6 +78,12 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
         .entry_point
         .unwrap_or_else(|| syn::LitStr::new("main", args.slang_path.span()));
     let high_precision = args.high_precision;
+
+    let mut combined_err: Option<syn::Error> = None;
+    let mut push_err = |err: syn::Error| match &mut combined_err {
+        Some(existing) => existing.combine(err),
+        None => combined_err = Some(err),
+    };
 
     let input_fn: syn::ItemFn = syn::parse2(body)?;
     let kernel_is_raw = parse_raw_attr(&input_fn.attrs)?;
@@ -233,13 +108,25 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
         ));
     }
 
-    let reflection = ShaderCache::get_or_compile(
+    let reflection = match ShaderCache::get_or_compile(
         &fn_name.to_string(),
         &absolute_slang_path,
         &entry_point,
+        &args.profiles,
         high_precision,
-    )
-    .map_err(|err| syn::Error::new(input_fn.sig.ident.span(), err))?;
+    ) {
+        Ok(refl) => refl,
+        Err(err) => {
+            push_err(syn::Error::new(args.slang_path.span(), err));
+            return Err(combined_err.unwrap());
+        }
+    };
+
+    if let Some(w) = &reflection.warnings {
+        if !w.trim().is_empty() {
+            eprintln!("{}", format_concise_slang_warning(&slang_path_str, w));
+        }
+    }
 
     let pc_resource = reflection.push_constant();
     let total_size = pc_resource.map(|r| r.total_size as usize).unwrap_or(0);
@@ -273,12 +160,13 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
         raw_arg_tys.push(arg_ty);
 
         // Search for that member in slang reflection
-        let (member_idx, member) = reflection.find_member(&arg_str).ok_or_else(|| {
-            syn::Error::new(
+        let Some((member_idx, member)) = reflection.find_member(&arg_str) else {
+            push_err(syn::Error::new(
                 arg_name.span(),
                 format!("Cannot find field '{arg_str}' in slang shader."),
-            )
-        })?;
+            ));
+            continue;
+        };
 
         let offset = member.offset as usize;
         let slang_size = member.size as usize;
@@ -309,14 +197,15 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
                     fn_args.push(quote::quote! { #arg_name: u64 });
 
                     param_copies.push(quote::quote! {
-                                ___push_constant_bytes[#offset..#end].copy_from_slice(&#arg_name.to_ne_bytes());
-                            });
+                        ___push_constant_bytes[#offset..#end].copy_from_slice(&#arg_name.to_ne_bytes());
+                    });
                 } else {
                     let syn::Type::Reference(type_ref) = &**arg_ty else {
-                        return Err(syn::Error::new_spanned(
+                        push_err(syn::Error::new_spanned(
                             arg_ty,
                             format!("BDA argument '{arg_str}' must be a reference (& or &mut)."),
                         ));
+                        continue;
                     };
 
                     let is_mut = type_ref.mutability.is_some();
@@ -342,22 +231,22 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
                             let expected_offset = child.offset as usize;
 
                             const_asserts.push(quote::quote! {
-                                        assert!(
-                                            ::core::mem::offset_of!(#inner_ty, #child_ident) == #expected_offset,
-                                            concat!(
-                                                "Field '", stringify!(#child_ident),
-                                                "' of BDA Struct '", stringify!(#inner_ty),
-                                                "' has different offset with slang shader (", #expected_offset, "B)."
-                                            )
-                                        );
-                                    });
+                                assert!(
+                                    ::core::mem::offset_of!(#inner_ty, #child_ident) == #expected_offset,
+                                    concat!(
+                                        "Field '", stringify!(#child_ident),
+                                        "' of BDA Struct '", stringify!(#inner_ty),
+                                        "' has different offset with slang shader (", #expected_offset, "B)."
+                                    )
+                                );
+                            });
                         }
                     }
 
                     param_copies.push(quote::quote! {
-                                let bda_val = #arg_name.bda();
-                                ___push_constant_bytes[#offset..#end].copy_from_slice(&bda_val.to_ne_bytes());
-                            });
+                        let bda_val = #arg_name.bda();
+                        ___push_constant_bytes[#offset..#end].copy_from_slice(&bda_val.to_ne_bytes());
+                    });
 
                     let access = if is_mut {
                         quote::quote! { gpgpru::__private::AccessType::Write }
@@ -399,15 +288,15 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
                             let expected_offset = child.offset as usize;
 
                             const_asserts.push(quote::quote! {
-                                        assert!(
-                                            ::core::mem::offset_of!(#arg_ty, #child_ident) == #expected_offset,
-                                            concat!(
-                                                "Field '", stringify!(#child_ident),
-                                                "' of Struct '", stringify!(#arg_ty),
-                                                "' has different offset with slang shader (", #expected_offset, "B)."
-                                            )
-                                        );
-                                    });
+                                assert!(
+                                    ::core::mem::offset_of!(#arg_ty, #child_ident) == #expected_offset,
+                                    concat!(
+                                        "Field '", stringify!(#child_ident),
+                                        "' of Struct '", stringify!(#arg_ty),
+                                        "' has different offset with slang shader (", #expected_offset, "B)."
+                                    )
+                                );
+                            });
                         }
                     }
 
@@ -420,19 +309,23 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
                 } else {
                     // #[raw]: Raw byte copy
                     param_copies.push(quote::quote! {
-                                let raw_bytes = unsafe {
-                                    ::core::slice::from_raw_parts(
-                                        (&#arg_name as *const _).cast::<u8>(),
-                                        ::core::mem::size_of_val(&#arg_name),
-                                    )
-                                };
-                                let copy_len = raw_bytes.len().min(#slang_size);
-                                let end = #offset + copy_len;
-                                ___push_constant_bytes[#offset..end].copy_from_slice(&raw_bytes[..copy_len]);
-                            });
+                        let raw_bytes = unsafe {
+                            ::core::slice::from_raw_parts(
+                                (&#arg_name as *const _).cast::<u8>(),
+                                ::core::mem::size_of_val(&#arg_name),
+                            )
+                        };
+                        let copy_len = raw_bytes.len().min(#slang_size);
+                        let end = #offset + copy_len;
+                        ___push_constant_bytes[#offset..end].copy_from_slice(&raw_bytes[..copy_len]);
+                    });
                 }
             }
         }
+    }
+
+    if let Some(err) = combined_err {
+        return Err(err);
     }
 
     // ----------------------------------------------------------------------------------
@@ -449,6 +342,8 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
                 const _: &str = include_str!(#dep_path);
             }
         });
+
+    // let profile_paths = args.profile_paths;
 
     Ok(quote::quote! {
         // For telling cargo to recompile
@@ -468,6 +363,11 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
             #(#fn_args),*
         ) -> gpgpru::__private::CommandBuilder<'a, impl gpgpru::__private::HazardTrace + Copy + 'static> {
             static SPIRV_CODE: &[u32] = &[#(#spirv_words),*];
+
+            // #[allow(unused)]
+            // const _PROFILES: &[gpgpru::prelude::SlangProfile] = &[
+            //     #( #profile_paths ),*
+            // ];
 
             let mut ___push_constant_bytes = [0u8; #total_size];
             #(#param_copies)*

@@ -20,7 +20,7 @@ jobs:
       - name: Install SPIRV-Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y spirv-tools spirv-headers libvulkan-dev
+          sudo apt-get install -y spirv-tools spirv-tools-dev spirv-headers libvulkan-dev
       - name: Publish
         run: cargo publish --workspace
         env:

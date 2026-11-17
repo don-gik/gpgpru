@@ -6,6 +6,8 @@ pub use gpgpru_macro::{kernel, raw};
 
 pub mod prelude {
     pub use gpgpru_core::IntoWorkgroup;
+    // pub use gpgpru_core::SlangProfile;
+    // pub use gpgpru_core::SlangProfile::*;
     pub use gpgpru_core::{CpuToGpu, GpuOnly, GpuToCpu, Shared};
 }
 

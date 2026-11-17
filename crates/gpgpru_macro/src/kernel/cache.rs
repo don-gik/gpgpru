@@ -11,6 +11,11 @@ pub struct CacheEntry {
 static MEMORY_CACHE: LazyLock<RwLock<FxHashMap<String, CacheEntry>>> =
     LazyLock::new(|| RwLock::new(FxHashMap::default()));
 
+static COMPILE_COOLDOWN: LazyLock<RwLock<FxHashMap<String, std::time::Instant>>> =
+    LazyLock::new(|| RwLock::new(FxHashMap::default()));
+
+const RECOMPILE_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(800);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedMember {
     pub name: String,
@@ -39,6 +44,8 @@ pub struct ShaderReflection {
     pub spirv_bytes: Vec<u32>,
     pub resources: Vec<CachedResource>,
     pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub warnings: Option<String>,
 }
 
 impl ShaderReflection {
@@ -77,6 +84,7 @@ impl ShaderReflection {
             spirv_bytes: compile_result.spirv_u32().to_vec(),
             resources,
             dependencies,
+            warnings: compile_result.warning_message().map(|s| s.to_string()),
         }
     }
 
@@ -125,6 +133,18 @@ impl ShaderCache {
         }
 
         true
+    }
+
+    fn is_in_cooldown(cache_key: &str) -> bool {
+        let map = COMPILE_COOLDOWN.read().unwrap_or_else(|e| e.into_inner());
+        map.get(cache_key)
+            .map(|t| t.elapsed() < RECOMPILE_COOLDOWN)
+            .unwrap_or(false)
+    }
+
+    fn mark_compiled(cache_key: &str) {
+        let mut map = COMPILE_COOLDOWN.write().unwrap_or_else(|e| e.into_inner());
+        map.insert(cache_key.to_string(), std::time::Instant::now());
     }
 
     pub fn get_cache_dir() -> Utf8PathBuf {
@@ -229,6 +249,7 @@ impl ShaderCache {
         kernel_name: &str,
         slang_path: &Utf8Path,
         entry_point: &str,
+        profiles: &[SlangProfile],
         high_precision: bool,
     ) -> Result<ShaderReflection, SlangError> {
         let flattened_path = Self::flatten_workspace_path(slang_path);
@@ -237,13 +258,26 @@ impl ShaderCache {
                 file_path: flattened_path,
             });
         }
-        let cache_key = format!("{}___{}___{}", kernel_name, flattened_path, entry_point);
+        let mut opt_hasher = FxHasher::default();
+        for p in profiles {
+            opt_hasher.write_i32(*p as i32);
+        }
+        opt_hasher.write_u8(high_precision as u8);
+        let cache_key = format!(
+            "{}___{}___{}___{:016x}",
+            kernel_name,
+            flattened_path,
+            entry_point,
+            opt_hasher.finish()
+        );
+
+        let in_cooldown = Self::is_in_cooldown(&cache_key);
 
         // 1. L1 Memory Cache (Read Lock)
         {
             let cache = MEMORY_CACHE.read().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = cache.get(&cache_key) {
-                if Self::is_cache_valid(entry) {
+                if Self::is_cache_valid(entry) || in_cooldown {
                     return Ok(entry.reflection.clone());
                 }
             }
@@ -252,7 +286,7 @@ impl ShaderCache {
         // Write Lock, when cache miss
         let mut cache = MEMORY_CACHE.write().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.get(&cache_key) {
-            if Self::is_cache_valid(entry) {
+            if Self::is_cache_valid(entry) || Self::is_in_cooldown(&cache_key) {
                 return Ok(entry.reflection.clone());
             }
         }
@@ -265,10 +299,12 @@ impl ShaderCache {
         }
 
         // Actual compiling - cache miss
+        Self::mark_compiled(&cache_key);
         let live_result = GLOBAL_CONTEXT.compile(
             kernel_name,
             slang_path.as_str(),
             entry_point,
+            profiles,
             high_precision,
         )?;
         let reflection = ShaderReflection::from_compile_result(&live_result);

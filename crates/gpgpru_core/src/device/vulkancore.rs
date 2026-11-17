@@ -270,7 +270,8 @@ impl VulkanCore {
         let mut features_12 = vk::PhysicalDeviceVulkan12Features::default()
             .timeline_semaphore(true)
             .buffer_device_address(true)
-            .descriptor_indexing(true);
+            .descriptor_indexing(true)
+            .host_query_reset(true);
 
         let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
             .synchronization2(true)
