@@ -27,9 +27,33 @@ impl DeviceConfig {
     // }
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SlangProfile {
+macro_rules! define_slang_profiles {
+    ($( $(#[$meta:meta])* $variant:ident = $val:expr ),* $(,)?) => {
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum SlangProfile {
+            $(
+                $(#[$meta])*
+                $variant = $val,
+            )*
+        }
+
+        impl SlangProfile {
+            pub const VARIANT_NAMES: &'static [&'static str] = &[
+                $( stringify!($variant), )*
+            ];
+
+            pub fn from_variant_name(name: &str) -> Option<Self> {
+                match name {
+                    $( stringify!($variant) => Some(Self::$variant), )*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+define_slang_profiles! {
     Spirv1_5 = 0,
     Spirv1_6 = 1,
 
@@ -45,23 +69,4 @@ pub enum SlangProfile {
     SpvCooperativeMatrixKHR = 200,
     SpvFloat16 = 201,
     SpvInt64 = 202,
-}
-
-impl SlangProfile {
-    pub fn from_variant_name(name: &str) -> Option<Self> {
-        match name {
-            "Spirv1_5" => Some(Self::Spirv1_5),
-            "Spirv1_6" => Some(Self::Spirv1_6),
-            "SpvGroupNonUniform" => Some(Self::SpvGroupNonUniform),
-            "SpvGroupNonUniformVote" => Some(Self::SpvGroupNonUniformVote),
-            "SpvGroupNonUniformArithmetic" => Some(Self::SpvGroupNonUniformArithmetic),
-            "SpvGroupNonUniformBallot" => Some(Self::SpvGroupNonUniformBallot),
-            "SpvGroupNonUniformShuffle" => Some(Self::SpvGroupNonUniformShuffle),
-            "SpvGroupNonUniformShuffleRelative" => Some(Self::SpvGroupNonUniformShuffleRelative),
-            "SpvCooperativeMatrixKHR" => Some(Self::SpvCooperativeMatrixKHR),
-            "SpvFloat16" => Some(Self::SpvFloat16),
-            "SpvInt64" => Some(Self::SpvInt64),
-            _ => None,
-        }
-    }
 }
