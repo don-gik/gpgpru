@@ -32,10 +32,9 @@ use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use smallvec::{SmallVec, smallvec};
-use std::cell::Cell;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub(crate) struct SharedContext {
     pub(crate) core: Arc<VulkanCore>,
