@@ -6,6 +6,9 @@ description = "Core lib for gpgpru"
 license.workspace = true
 readme.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 ash = "0.38.0"
 bytemuck.workspace = true

@@ -18,14 +18,14 @@ pub(crate) struct TaskBatch {
 
 pub(crate) struct TaskQueue {
     queue: SegQueue<Task>,
-    last_was_timestamp: Cell<bool>,
+    last_was_timestamp: AtomicBool,
 }
 
 impl TaskQueue {
     pub(crate) fn new() -> Self {
         Self {
             queue: SegQueue::new(),
-            last_was_timestamp: Cell::new(false),
+            last_was_timestamp: AtomicBool::new(false),
         }
     }
 
@@ -38,18 +38,19 @@ impl TaskQueue {
         let len = self.queue.len();
         let is_timestamp = matches!(task.payload, TaskPayload::Timestamp { .. });
 
+        let prev_timestamp = self.last_was_timestamp.swap(is_timestamp, Ordering::AcqRel);
+
         if len > 0 {
             let prev_idx = (len - 1) as u32;
 
             // If previous task was timestamp or current task is timestamp
             // Then add DAG graph dep
-            if is_timestamp || self.last_was_timestamp.get() {
+            if is_timestamp || prev_timestamp {
                 task.hazards.deps.push(prev_idx as u16);
             }
         }
 
         // Record current task
-        self.last_was_timestamp.set(is_timestamp);
         self.queue.push(task);
     }
 
