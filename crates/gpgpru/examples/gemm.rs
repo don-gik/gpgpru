@@ -2,7 +2,7 @@ use gpgpru::config::{DeviceConfig, DeviceSelector};
 use gpgpru::utils::GpuTimer;
 use gpgpru::{Device, GpuSlice, Result, create_buffer, kernel, read_buffer};
 
-#[kernel("examples/gemm.slang", "gemm")]
+#[kernel("examples/gemm.slang", "gemm", profiles = [Spirv1_6])]
 fn gemm(
     A: &GpuSlice<f32>,
     B: &GpuSlice<f32>,
@@ -32,8 +32,8 @@ fn main() -> Result<()> {
     let buf_b = create_buffer(&host_b).with(&device)?;
     let mut buf_c = create_buffer(&host_c).with(&device)?;
 
-    // Block dimensions for 64x64 tiling
-    let (bm, bn) = (64, 64);
+    // Block dimensions for 16x16 tiling
+    let (bm, bn) = (16, 16);
     let groups = ((n + bn - 1) / bn, (m + bm - 1) / bm, 1);
 
     // Warm-up pass

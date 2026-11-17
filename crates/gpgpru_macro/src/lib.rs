@@ -4,6 +4,8 @@ mod kernel;
 use ffi::*;
 use kernel::*;
 
+use gpgpru_core::SlangProfile;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 

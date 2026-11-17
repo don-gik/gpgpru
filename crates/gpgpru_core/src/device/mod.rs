@@ -10,7 +10,7 @@ pub mod utils;
 mod vulkancore;
 
 pub use command::{CommandBuilder, IntoWorkgroup, Task};
-pub use config::DeviceConfig;
+pub use config::{DeviceConfig, SlangProfile};
 pub use vulkancore::DeviceSelector;
 
 // Pub some modules
