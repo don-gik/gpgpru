@@ -1,8 +1,3 @@
-// #![warn(missing_docs)]
-// #![warn(clippy::missing_panics_doc)]
-// #![warn(clippy::missing_errors_doc)]
-// #![warn(clippy::missing_safety_doc)]
-
 mod buffer;
 mod device;
 mod error;
@@ -12,8 +7,11 @@ use ash::vk;
 
 pub use buffer::linear::{GpuBuffer, GpuSlice, create_buffer, read_buffer, write_buffer};
 pub use buffer::{CpuToGpu, GpuOnly, GpuToCpu, Shared};
-pub use device::{Device, DeviceConfig, DeviceSelector, IntoWorkgroup, SlangProfile};
-pub use device::{dma, utils};
+pub use device::dma;
+pub use device::utils;
+pub use device::{
+    Device, DeviceConfig, DeviceSelector, IntoWorkgroup, SemaphoreValue, SlangProfile,
+};
 pub use error::{GpuError, Result};
 
 pub(crate) use device::{AllocDesc, Collectable, Dispose, SharedContext};
@@ -25,7 +23,9 @@ pub mod __private {
         BufferBuilder, BufferInit, BufferReadBuilder, BufferReadIntoBuilder, BufferSource,
     };
     pub use crate::buffer::*;
-    pub use crate::device::{CommandBuilder, Task};
+    pub use crate::device::{CommandBuilder, ComputeArgs, DescriptorPayload, PushDescriptor, Task};
 
-    pub use crate::page::{AccessType, HazardTrace};
+    pub use crate::page::AccessType;
+
+    pub use ash::vk;
 }

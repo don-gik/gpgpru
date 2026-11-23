@@ -1,12 +1,9 @@
 use super::*;
 
 mod l1table;
-mod traits;
 
 use parking_lot::Mutex;
 use smallvec::SmallVec;
-
-pub use traits::HazardTrace;
 
 static PAGE_SHIFT: u64 = 16;
 // pub const PAGE_SIZE: u64 = 1 << PAGE_SHIFT;

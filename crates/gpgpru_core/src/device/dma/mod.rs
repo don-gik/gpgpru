@@ -7,6 +7,7 @@ pub use ops::*;
 use traits::*;
 
 /// A builder pattern for DMA operations.
+#[must_use = "DmaTask does nothing unless `.with(&device)` is called"]
 pub struct DmaTask<F>
 where
     F: Fn(&Device) -> (bool, HazardResult),
@@ -26,7 +27,7 @@ where
         }
     }
 
-    pub fn with(self, device: &Device) -> Result<u64> {
+    pub fn with(self, device: &Device) -> Result<SemaphoreValue> {
         let (has_write, hazards) = (self.get_hazards)(device);
 
         device.shared.cmd_manager.push(Task {

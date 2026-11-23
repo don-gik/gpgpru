@@ -9,7 +9,9 @@ mod pipeline;
 pub mod utils;
 mod vulkancore;
 
-pub use command::{CommandBuilder, IntoWorkgroup, Task};
+pub use command::{
+    CommandBuilder, ComputeArgs, DescriptorPayload, IntoWorkgroup, PushDescriptor, Task,
+};
 pub use config::{DeviceConfig, SlangProfile};
 pub use vulkancore::DeviceSelector;
 
@@ -29,7 +31,6 @@ use debug::DebugContext;
 use ash::Device as LogicalDevice;
 use ash::{Entry, Instance};
 use crossbeam_queue::SegQueue;
-use dashmap::DashMap;
 use parking_lot::Mutex;
 use smallvec::{SmallVec, smallvec};
 use std::mem::ManuallyDrop;
@@ -45,64 +46,103 @@ pub(crate) struct SharedContext {
     pub(crate) page_tracker: PageTracker,
 }
 
-/// Represents the primary GPU device handle and core entry point for the engine.
+/// An opaque handle representing a specific batch submission on the GPU timeline.
 ///
-/// `Device` encapsulates the low-level Vulkan abstractions and serves
-/// as the central interface for dispatching compute workloads, allocating GPU resources,
-/// and managing pipeline states.
+/// You can't construct or forge this yourself (nice try)—the only way to get one is by
+/// calling [`Device::dispatch`] or [`CommandBuilder::with`]. Pass it to [`Device::wait_timeline`]
+/// to wait for that exact batch of work to finish.
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, PartialOrd, Ord)]
+pub struct SemaphoreValue(pub(crate) u64);
+
+impl SemaphoreValue {
+    /// Returns the raw underlying timeline counter value, in case you want to log or inspect it.
+    #[inline]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// Your diplomatic embassy to a physical GPU and its Vulkan context.
+///
+/// `Device` wraps all the gnarly low-level Vulkan machinery—command queues, pipeline caches,
+/// memory allocators, and garbage collection—behind a single thread-safe handle.
+///
+/// You can cheaply `.clone()` it if needed (it's backed by an `Arc` internally), and when
+/// the last handle drops, it politely waits for the GPU to finish before tearing everything down.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use gpgpru::{Device, DeviceSelector};
+/// # fn main() -> gpgpru::Result<()> {
+/// use gpgpru::{Device, DeviceConfig};
 ///
-/// let device = Device::new(DeviceSelector::Default)?;
+/// // Grab the default GPU
+/// let device = Device::new()?;
+///
+/// // Or pass a custom configuration
+/// let custom_device = Device::with(DeviceConfig::default())?;
+/// # Ok(())
+/// # }
 /// ```
+#[derive(Clone)]
 pub struct Device {
     pub(crate) shared: Arc<SharedContext>,
 }
 
 impl Device {
-    /// Creates new `Device` struct.
+    /// Initializes a new [`Device`] using [`DeviceConfig::default()`].
+    ///
+    /// Automatically picks a suitable Vulkan 1.3+ GPU with compute support so you can
+    /// start crunching numbers immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`GpuError`] if:
+    /// - Vulkan fails to load or initialize on your system
+    /// - No GPU supports Vulkan 1.3+ or exposes a compute queue
+    /// - The [`DeviceSelector`] criteria rule out every GPU in your machine
     ///
     /// # Examples
+    ///
     /// ```no_run
-    /// use gpgpru::{Device, Result};
+    /// # fn main() -> gpgpru::Result<()> {
+    /// use gpgpru::Device;
     ///
     /// let device = Device::new()?;
+    /// # Ok(())
+    /// # }
     /// ```
-    ///
-    /// # Error
-    /// The function fails when :
-    /// - Vulkan fails to initialize
-    /// - No device with certain criteria
-    /// - Vulkan API issues, or Vulkan not found in system
     pub fn new() -> Result<Self> {
         Self::with(DeviceConfig::default())
     }
 
-    /// Creates new `Device` struct, while providing `DeviceConfig` for selecting device.
+    /// Initializes a new [`Device`] with a custom [`DeviceConfig`].
+    ///
+    /// Use this when you have multiple GPUs (e.g., integrated vs. discrete) and want
+    /// to be picky about which one gets the job.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`GpuError`] if:
+    /// - Vulkan fails to load or initialize on your system
+    /// - No GPU matches the criteria specified in `device_config`
     ///
     /// # Examples
+    ///
     /// ```no_run
-    /// # use gpgpru::{Device, Result};
-    /// # use gpgpru::config::DeviceConfig;
+    /// # fn main() -> gpgpru::Result<()> {
+    /// use gpgpru::{Device, DeviceConfig};
     ///
     /// let device = Device::with(DeviceConfig::default())?;
+    /// # Ok(())
+    /// # }
     /// ```
-    ///
-    /// # Error
-    ///
-    /// The function fails when :
-    /// - Vulkan fails to initialize
-    /// - No device with certain criteria
-    /// - Vulkan API issues, or Vulkan not found in system
     pub fn with(device_config: DeviceConfig) -> Result<Self> {
         let core = Arc::new(VulkanCore::init(device_config.device_selector)?);
 
         let allocator = AllocationManager::new(core.clone())?;
         let cmd_manager = CommandManager::new(core.clone())?;
-        let pipeline = PipelineManager::new(core.clone());
+        let pipeline = PipelineManager::new(core.clone())?;
         let gc = GarbageManager::new();
 
         let shared = Arc::new(SharedContext {
@@ -119,13 +159,19 @@ impl Device {
 }
 
 impl Device {
+    /// Returns the timeline semaphore value that will be signaled by the next [`Device::dispatch`] call.
+    ///
+    /// Used internally to track which GPU batch a resource or operation belongs to
+    /// before the commands are actually submitted.
     #[inline]
-    pub(crate) fn pending_epoch(&self) -> u64 {
+    pub(crate) fn pending_epoch(&self) -> SemaphoreValue {
         use std::sync::atomic::Ordering;
-        self.shared
-            .cmd_manager
-            .next_semaphore_value
-            .load(Ordering::Relaxed)
+        SemaphoreValue(
+            self.shared
+                .cmd_manager
+                .next_semaphore_value
+                .load(Ordering::Relaxed),
+        )
     }
 
     #[inline]
@@ -133,13 +179,26 @@ impl Device {
         self.shared.cmd_manager.task_queue.len()
     }
 
+    /// Returns the number of queued tasks waiting to be dispatched to the GPU.
+    ///
+    /// Calling `.queue(...)` on a kernel stages tasks here without actually poking
+    /// the GPU yet—this tells you how big that backlog currently is.
     #[inline]
     pub fn pending_tasks(&self) -> usize {
         self.shared.cmd_manager.task_queue.len() as usize
     }
 
-    pub fn wait_timeline(&self, value: u64) -> Result<()> {
-        if value == 0 {
+    /// Blocks the CPU thread until the GPU's timeline semaphore reaches `semaphore_value`.
+    ///
+    /// If there are still unsubmitted tasks sitting in the queue, this will automatically
+    /// call [`Device::dispatch`] first so you don't accidentally deadlock yourself waiting
+    /// for work that was never sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`GpuError`] if flushing pending tasks fails or the Vulkan semaphore wait errors out.
+    pub fn wait_timeline(&self, semaphore_value: SemaphoreValue) -> Result<()> {
+        if semaphore_value.0 == 0 {
             return Ok(());
         }
 
@@ -150,7 +209,7 @@ impl Device {
         let semaphore = self.shared.cmd_manager.timeline_semaphore;
         let wait_info = vk::SemaphoreWaitInfo::default()
             .semaphores(std::slice::from_ref(&semaphore))
-            .values(std::slice::from_ref(&value));
+            .values(std::slice::from_ref(&semaphore_value.0));
 
         unsafe {
             self.shared
@@ -162,6 +221,14 @@ impl Device {
         Ok(())
     }
 
+    /// Freezes the CPU until the GPU finishes literally everything in flight (`vkDeviceWaitIdle`).
+    ///
+    /// The brute-force synchronization hammer. Handy for debugging or shutdown, though
+    /// [`Device::wait_timeline`] is usually nicer for fine-grained waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuError::Vulkan`] if the driver encounters an error while idling.
     pub fn wait_idle(&self) -> Result<()> {
         unsafe {
             self.shared.core.logical_device.device_wait_idle()?;
@@ -169,13 +236,22 @@ impl Device {
         Ok(())
     }
 
-    pub fn dispatch(&self) -> Result<u64> {
-        self.shared.cmd_manager.dispatch(
+    /// Flushes all queued compute tasks and DMA transfers to the GPU in a single batch.
+    ///
+    /// This resolves data hazards (RAW/WAR/WAW) across your queued commands, inserts the
+    /// necessary pipeline barriers automatically, and submits the command buffer.
+    ///
+    /// # Returns & Errors
+    ///
+    /// Returns the timeline semaphore value ([`SemaphoreValue`]) representing this batch, which you can
+    /// pass to [`Device::wait_timeline`] later—or returns a [`GpuError`] if submission fails.
+    pub fn dispatch(&self) -> Result<SemaphoreValue> {
+        Ok(SemaphoreValue(self.shared.cmd_manager.dispatch(
             &self.shared.pipeline,
             &self.shared.gc,
             &self.shared.allocator,
             &self.shared.page_tracker,
-        )
+        )?))
     }
 }
 
@@ -185,10 +261,14 @@ impl Device {
         spirv_code: &'a [u32],
         push_constants_size: u32,
         entry_point: &'a str,
-    ) -> Result<u64> {
-        self.shared
-            .pipeline
-            .get_or_create(spirv_code, entry_point, push_constants_size)
+        descriptor_types: &[vk::DescriptorType],
+    ) -> Result<PipelineId> {
+        self.shared.pipeline.get_or_create(
+            spirv_code,
+            entry_point,
+            push_constants_size,
+            descriptor_types,
+        )
     }
 
     pub(crate) fn push_command(&self, task: Task) {

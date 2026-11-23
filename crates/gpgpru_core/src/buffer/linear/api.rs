@@ -46,6 +46,49 @@ pub struct BufferBuilder<'a, T, const LOC: u8 = { GpuOnly.to_u8() }> {
 // Entry Point Functions
 // ----------------------------------------------------------------
 
+/// A Swiss-army-knife utility function for creating and initializing a GPU buffer.
+///
+/// Yes, its generic type signature looks like a crime scene—please don't stare directly at it,
+/// just read this docstring instead.
+///
+/// It handles both initial data and memory placement in one go.
+/// By default, your data gets dropped into `GpuOnly` memory with zero extra fuss.
+///
+/// # Builder Options
+///
+/// - `.on(location)` — Tells the buffer where to live ([`GpuOnly`], [`Shared`], [`CpuToGpu`], [`GpuToCpu`], they are in prelude!).
+///   Defaults to [`GpuOnly`] (fast GPU VRAM, strictly no CPU peeking).
+/// - `.with(&device)` — Actually summons the buffer into existence on the given [`Device`]
+///   and uploads your data if you brought any.
+///
+/// # Returns & Errors
+///
+/// Calling `.with(&device)` yields a [`Result<GpuBuffer<T>>`](crate::Result).
+/// If all goes well, you get a shiny new [`GpuBuffer`]. If your GPU runs out of VRAM,
+/// Vulkan throws a tantrum, or the DMA upload fails, you'll get a [`GpuError`] instead.
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn main() -> gpgpru::Result<()> {
+/// use gpgpru::{create_buffer, Device, MemoryLocation::Shared};
+///
+/// let device = Device::new();
+///
+/// // Feed it a Vec or slice, and it quietly handles `dma::copy` behind the scenes.
+/// let host_data = vec![1.0f32; 100];
+/// let buf_a = create_buffer(&host_data).with(&device)?;
+///
+/// // Or just give it a number if you want a blank slate of 100 `u32`s.
+/// let buf_b = create_buffer::<u32>(100).with(&device)?;
+///
+/// // Need the CPU and GPU to share custody? Use `.on(Shared)`.
+/// let mut shared_buf = create_buffer(&host_data)
+///     .on(Shared)
+///     .with(&device)?;
+/// # Ok(())
+/// # }
+/// ```
 pub fn create_buffer<'a, T>(
     init: impl BufferInit<'a, T>,
 ) -> BufferBuilder<'a, T, { GpuOnly.to_u8() }> {
@@ -56,10 +99,74 @@ pub fn create_buffer<'a, T>(
     }
 }
 
+/// Pulls data out of a [`GpuSlice`] and brings it back to CPU civilization.
+///
+/// Since you can't just dereference VRAM like a normal slice (unless you enjoy segfaults),
+/// this builder sets up a DMA transfer from the GPU into a host slice you provide.
+///
+/// # Builder Options
+///
+/// - `.into(dst)` — Specifies the destination host slice (`&mut [T]`) where the GPU bytes will land.
+/// - `.with(&device)` — Actually executes the copy on the given [`Device`].
+///
+/// # Returns & Errors
+///
+/// Calling `.with(&device)` yields a [`Result<()>`](crate::Result).
+/// If the slice lengths don't match or the GPU decides not to cooperate during DMA,
+/// you'll get a [`GpuError`] instead.
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn main() -> gpgpru::Result<()> {
+/// use gpgpru::prelude::*;
+/// use gpgpru::{create_buffer, read_buffer, Device};
+///
+/// let device = Device::new()?;
+/// let gpu_buf = create_buffer(&vec![1.0f32, 2.0, 3.0, 4.0]).with(&device)?;
+///
+/// let mut host_dst = vec![0.0f32; 4];
+/// read_buffer(&gpu_buf).into(&mut host_dst).with(&device)?;
+///
+/// assert_eq!(host_dst, vec![1.0, 2.0, 3.0, 4.0]);
+/// # Ok(())
+/// # }
+/// ```
 pub fn read_buffer<'a, T>(slice: &'a GpuSlice<T>) -> BufferReadBuilder<'a, T> {
     BufferReadBuilder { slice }
 }
 
+/// Ships fresh data from CPU land straight into an existing [`GpuSlice`].
+///
+/// Use this when you already have an allocated GPU buffer and want to overwrite its
+/// contents without spinning up a brand-new buffer every frame.
+///
+/// # Builder Options
+///
+/// - `.from(src)` — Specifies the source host slice (`&[T]`) to upload from.
+/// - `.with(&device)` — Fires off the transfer on the given [`Device`].
+///
+/// # Returns & Errors
+///
+/// Calling `.with(&device)` yields a [`Result<()>`](crate::Result).
+/// Returns a [`GpuError`] if the source and destination sizes don't line up
+/// or if the underlying Vulkan transfer fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn main() -> gpgpru::Result<()> {
+/// use gpgpru::prelude::*;
+/// use gpgpru::{create_buffer, write_buffer, Device};
+///
+/// let device = Device::new()?;
+/// let mut gpu_buf = create_buffer::<f32>(4).with(&device)?;
+///
+/// let new_data = [10.0f32, 20.0, 30.0, 40.0];
+/// write_buffer(&mut gpu_buf).from(&new_data).with(&device)?;
+/// # Ok(())
+/// # }
+/// ```
 pub fn write_buffer<'a, 'b, T>(slice: &'a mut GpuSlice<'b, T>) -> BufferWriteBuilder<'a, 'b, T> {
     BufferWriteBuilder { slice }
 }
@@ -178,7 +285,7 @@ fn read_buffer_internal<T: Copy>(
         .get_last_write_epoch(slice.bda(), slice.size());
 
     if last_written_epoch > 0 {
-        device.wait_timeline(last_written_epoch)?;
+        device.wait_timeline(SemaphoreValue(last_written_epoch))?;
     }
 
     // 1. Host-Visible: Mapped Pointer Direct Copy

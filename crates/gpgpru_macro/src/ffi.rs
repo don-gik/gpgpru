@@ -39,9 +39,11 @@ pub mod raw {
     pub enum ResourceKind {
         PushConstant = 0,
         Uniform = 1,
-        Texture = 2,
-        Sampler = 3,
-        StorageTexture = 4,
+        StorageBuffer = 2,
+        StorageBufferReadWrite = 3,
+        Texture = 4,
+        Sampler = 5,
+        StorageTexture = 6,
     }
 
     #[repr(C)]

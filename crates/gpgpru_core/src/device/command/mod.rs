@@ -1,8 +1,10 @@
+mod args;
 mod command;
 mod queue;
 mod scratch;
 mod task;
 
+pub use args::*;
 pub use command::*;
 use queue::*;
 use scratch::*;
@@ -152,7 +154,7 @@ impl CommandManager {
                 .begin_command_buffer(cmd_buffer, &begin_info)?;
         }
 
-        let mut current_pipeline_id: Option<u64> = None;
+        let mut current_pipeline_id: Option<PipelineId> = None;
         let mut current_layout: vk::PipelineLayout = vk::PipelineLayout::null();
 
         for batch in batches {
@@ -212,7 +214,7 @@ impl CommandManager {
             match batch.kind {
                 BatchKind::Compute(pipeline_id) => {
                     if current_pipeline_id != Some(pipeline_id) {
-                        let pipeline_info = pipeline_manager
+                        let cp = pipeline_manager
                             .get(pipeline_id)
                             .ok_or(GpuError::InvalidComputeTask)?;
 
@@ -220,22 +222,54 @@ impl CommandManager {
                             self.core.logical_device.cmd_bind_pipeline(
                                 cmd_buffer,
                                 vk::PipelineBindPoint::COMPUTE,
-                                pipeline_info.0,
+                                cp.pipeline,
                             );
                         }
 
                         current_pipeline_id = Some(pipeline_id);
-                        current_layout = pipeline_info.1;
+                        current_layout = cp.layout;
                     }
 
                     for task in &batch.tasks {
                         if let TaskPayload::Compute {
                             push_constants,
                             push_constants_size,
+                            descriptors,
                             dispatch_size,
                             ..
                         } = &task.payload
                         {
+                            // Write push descriptor
+                            if !descriptors.is_empty() {
+                                let mut descriptor_writes: SmallVec<[vk::WriteDescriptorSet; 8]> =
+                                    SmallVec::new();
+
+                                for (i, desc) in descriptors.iter().enumerate() {
+                                    let write = vk::WriteDescriptorSet::default()
+                                        .dst_binding(i as u32)
+                                        .descriptor_type(desc.ty);
+
+                                    let write = match &desc.payload {
+                                        DescriptorPayload::Buffer(info) => {
+                                            write.buffer_info(std::slice::from_ref(info))
+                                        } // DescriptorPayload::Image(info) => {
+                                          //     write.image_info(std::slice::from_ref(info))
+                                          // }
+                                    };
+                                    descriptor_writes.push(write);
+                                }
+
+                                unsafe {
+                                    self.core.push_descriptor.cmd_push_descriptor_set(
+                                        cmd_buffer,
+                                        vk::PipelineBindPoint::COMPUTE,
+                                        current_layout,
+                                        0,
+                                        &descriptor_writes,
+                                    );
+                                }
+                            }
+
                             if *push_constants_size > 0 {
                                 unsafe {
                                     self.core.logical_device.cmd_push_constants(

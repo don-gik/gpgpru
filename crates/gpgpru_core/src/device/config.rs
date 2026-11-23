@@ -1,5 +1,23 @@
 use super::DeviceSelector;
 
+/// Configuration options for initializing a `Device`.
+///
+/// Start with [`DeviceConfig::default()`] and chain builder methods like
+/// [`DeviceConfig::with_selector`] before passing it to `Device::with`.
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn main() -> gpgpru::Result<()> {
+/// use gpgpru::{Device, DeviceConfig, DeviceSelector};
+///
+/// let config = DeviceConfig::default()
+///     .with_selector(DeviceSelector::Default);
+///
+/// let device = Device::with(config)?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct DeviceConfig {
     pub(crate) device_selector: DeviceSelector,
@@ -7,6 +25,7 @@ pub struct DeviceConfig {
 }
 
 impl Default for DeviceConfig {
+    /// Creates a default configuration using [`DeviceSelector::Default`].
     fn default() -> Self {
         Self {
             device_selector: DeviceSelector::Default,
@@ -16,6 +35,7 @@ impl Default for DeviceConfig {
 }
 
 impl DeviceConfig {
+    /// Sets the [`DeviceSelector`] strategy used to pick which physical GPU gets the job.
     pub fn with_selector(mut self, device_selector: DeviceSelector) -> Self {
         self.device_selector = device_selector;
         self

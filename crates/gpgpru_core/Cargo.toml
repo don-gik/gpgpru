@@ -11,14 +11,10 @@ doctest = false
 
 [dependencies]
 ash = "0.38.0"
-bytemuck.workspace = true
-crossbeam-channel = "0.5.17"
 crossbeam-queue = "0.3.13"
 dashmap = "6.2.1"
-glam = "0.33.6"
 gpu-allocator = { version = "0.28.0", features = ["vulkan"] }
 parking_lot = "0.12.5"
-portable-atomic = "1.15.0"
 smallvec = "1.16.1"
 thiserror = "2.0.20"
 tracing = "0.1.44"

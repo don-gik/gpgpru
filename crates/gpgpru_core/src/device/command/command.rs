@@ -1,10 +1,17 @@
-use crate::__private::{AccessType, HazardTrace, Task};
-use crate::Device;
-use crate::Result;
+use super::*;
 
+/// Anything that can be converted into a 3D Vulkan compute workgroup dispatch grid `(x, y, z)`.
+///
+/// Nobody wants to write `(64, 1, 1)` every single time for a simple 1D array kernel—or cast
+/// `usize` to `u32` twenty times a day. This trait lets you pass whatever dimension feels natural:
+///
+/// - **1D scalar** (`64`, `1024usize`, etc.) → expands to `(x, 1, 1)`
+/// - **2D tuple** (`(16, 16)`) → expands to `(x, y, 1)`
+/// - **3D tuple or array** (`(8, 8, 4)` or `[8, 8, 4]`) → maps directly to `(x, y, z)`
 pub trait IntoWorkgroup {
     fn into_workgroup(self) -> (u32, u32, u32);
 }
+
 pub trait IntoU32 {
     fn into_u32(self) -> u32;
 }
@@ -13,6 +20,7 @@ macro_rules! impl_into_u32 {
     ($($t:ty),*) => {
         $(
             impl IntoU32 for $t {
+                #[inline]
                 fn into_u32(self) -> u32 { self as u32 }
             }
         )*
@@ -21,47 +29,53 @@ macro_rules! impl_into_u32 {
 impl_into_u32!(u8, u16, u32, u64, usize, i32, i64, isize);
 
 impl<T: IntoU32> IntoWorkgroup for T {
+    #[inline]
     fn into_workgroup(self) -> (u32, u32, u32) {
         (self.into_u32(), 1, 1)
     }
 }
 
 impl<A: IntoU32, B: IntoU32> IntoWorkgroup for (A, B) {
+    #[inline]
     fn into_workgroup(self) -> (u32, u32, u32) {
         (self.0.into_u32(), self.1.into_u32(), 1)
     }
 }
 
 impl<A: IntoU32, B: IntoU32, C: IntoU32> IntoWorkgroup for (A, B, C) {
+    #[inline]
     fn into_workgroup(self) -> (u32, u32, u32) {
         (self.0.into_u32(), self.1.into_u32(), self.2.into_u32())
     }
 }
 
 impl<T: IntoU32 + Copy> IntoWorkgroup for [T; 3] {
+    #[inline]
     fn into_workgroup(self) -> (u32, u32, u32) {
         (self[0].into_u32(), self[1].into_u32(), self[2].into_u32())
     }
 }
 
-pub struct CommandBuilder<'a, T: Copy> {
+#[must_use = "CommandBuilder does nothing unless `.with()` or `.queue()` is called"]
+pub struct CommandBuilder<'a, T: ComputeArgs> {
     spirv_code: &'a [u32],
     entry_point: &'a str,
-    push_data: T,
+    args: T,
 }
 
-impl<'a, T> CommandBuilder<'a, T>
-where
-    T: Copy + HazardTrace,
-{
-    pub fn new(spirv_code: &'a [u32], push_data: T) -> Self {
-        let size = std::mem::size_of::<T>();
-        assert!(size <= 128, "Push constants size exceeds 128 bytes");
+impl<'a, T: ComputeArgs> CommandBuilder<'a, T> {
+    pub fn new(spirv_code: &'a [u32], args: T) -> Self {
+        const {
+            assert!(
+                std::mem::size_of::<T::PushConstants>() <= 128,
+                "Push constants size exceeds 128 bytes"
+            );
+        }
 
         Self {
             spirv_code,
             entry_point: "main",
-            push_data: push_data,
+            args,
         }
     }
 
@@ -71,20 +85,21 @@ where
     }
 
     fn prepare_task(&self, device: &Device, workgroup: impl IntoWorkgroup) -> Result<Task> {
-        let mut task = Task::new_compute(&self.push_data, workgroup.into_workgroup());
+        let pc_size = std::mem::size_of::<T::PushConstants>() as u32;
         let pipeline_id = device.get_pipeline(
             self.spirv_code,
-            task.push_constants_size(),
+            pc_size,
             self.entry_point,
+            T::DESCRIPTOR_TYPES,
         )?;
 
-        let target_epoch = device.pending_epoch();
+        let target_epoch = device.pending_epoch().raw();
         let task_idx = device.next_task_index();
 
-        task.target_epoch = target_epoch;
+        let mut task = Task::new_compute(pipeline_id, &self.args, workgroup.into_workgroup())
+            .with_epoch(target_epoch);
 
-        let mut has_write = false;
-        self.push_data.trace_hazards(&mut |bda, size, access| {
+        self.args.trace_hazards(&mut |bda, size, access| {
             if let Some(hazard) = device.shared.page_tracker.check_and_update(
                 bda,
                 size,
@@ -103,21 +118,17 @@ where
                 }
             }
             if access == AccessType::Write {
-                has_write = true;
+                task.has_write = true;
             }
         });
 
-        task.has_write = has_write;
-        Ok(task.with_pipeline_id(pipeline_id))
+        Ok(task)
     }
 
-    pub fn with(&self, device: &Device, workgroup: impl IntoWorkgroup) -> Result<u64> {
+    pub fn with(&self, device: &Device, workgroup: impl IntoWorkgroup) -> Result<SemaphoreValue> {
         let task = self.prepare_task(device, workgroup)?;
         device.push_command(task);
-
-        let signal_value = device.dispatch()?;
-
-        Ok(signal_value)
+        device.dispatch()
     }
 
     pub fn queue(&self, device: &Device, workgroup: impl IntoWorkgroup) -> Result<()> {

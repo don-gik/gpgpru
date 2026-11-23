@@ -14,7 +14,7 @@ static MEMORY_CACHE: LazyLock<RwLock<FxHashMap<String, CacheEntry>>> =
 static COMPILE_COOLDOWN: LazyLock<RwLock<FxHashMap<String, std::time::Instant>>> =
     LazyLock::new(|| RwLock::new(FxHashMap::default()));
 
-const RECOMPILE_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(800);
+const RECOMPILE_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(2000);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedMember {
@@ -39,7 +39,7 @@ pub struct CachedResource {
     pub members: Vec<CachedMember>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ShaderReflection {
     pub spirv_bytes: Vec<u32>,
     pub resources: Vec<CachedResource>,
@@ -88,22 +88,39 @@ impl ShaderReflection {
         }
     }
 
-    pub fn push_constant(&self) -> Option<&CachedResource> {
-        self.resources
+    pub fn find_parameter(
+        &self,
+        name: &str,
+        span: proc_macro2::Span,
+    ) -> syn::Result<Option<ArgKind<'_>>> {
+        // push constant resource
+        let pc = self
+            .resources
             .iter()
-            .find(|r| r.kind == raw::ResourceKind::PushConstant)
-    }
+            .find(|r| r.kind == raw::ResourceKind::PushConstant);
 
-    pub fn find_member(&self, name: &str) -> Option<(usize, &CachedMember)> {
-        let pc = self.push_constant()?;
-        pc.members.iter().enumerate().find(|(_, m)| m.name == name)
-    }
+        // push constant: top-level member only (parent_idx == -1)
+        let pc_member = pc.and_then(|r| {
+            r.members
+                .iter()
+                .find(|m| m.name == name && m.parent_idx == -1)
+        });
 
-    pub fn child_members(&self, parent_idx: i32) -> impl Iterator<Item = &CachedMember> {
-        let pc = self.push_constant();
-        pc.into_iter()
-            .flat_map(|r| r.members.iter())
-            .filter(move |m| m.parent_idx == parent_idx)
+        // descriptor: resource name
+        let desc_res = self
+            .resources
+            .iter()
+            .find(|r| r.kind != raw::ResourceKind::PushConstant && r.name == name);
+
+        match (pc_member, desc_res) {
+            (Some(m), None) => Ok(Some(ArgKind::PushConstant { member: m })),
+            (None, Some(r)) => Ok(Some(ArgKind::Descriptor { res: r })),
+            (Some(_), Some(_)) => Err(syn::Error::new(
+                span,
+                format!("'{name}' found in both push constant and descriptor resource"),
+            )),
+            (None, None) => Ok(None),
+        }
     }
 }
 
@@ -194,7 +211,7 @@ impl ShaderCache {
             .strip_prefix(&workspace_root)
             .unwrap_or(slang_path);
 
-        rel_path.as_str().replace('/', "_").replace('\\', "_")
+        rel_path.to_string()
     }
 
     fn get_cache_file_path(hashed_key: &str) -> Utf8PathBuf {
@@ -266,7 +283,7 @@ impl ShaderCache {
         let cache_key = format!(
             "{}___{}___{}___{:016x}",
             kernel_name,
-            flattened_path,
+            flattened_path.replace('/', "_").replace('\\', "_"),
             entry_point,
             opt_hasher.finish()
         );

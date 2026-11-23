@@ -1,16 +1,31 @@
 use super::*;
 
-/// Strategy for selecting a physical device (GPU) for the Vulkan core.
+/// Strategy for picking which physical GPU gets the compute workload.
+///
+/// Passed to [`DeviceConfig::with_selector`] when initializing a [`Device`].
+/// If your machine has both an integrated GPU and a dedicated graphics card (or multiple GPUs),
+/// this lets you control which one Vulkan selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeviceSelector {
-    /// Selects the best available device based on score (Discrete GPU > Integrated GPU > Others).
+    /// Picks the strongest available GPU automatically (`Discrete > Integrated > Others`).
+    ///
+    /// Usually what you want unless you're trying to save battery life.
     #[default]
     Default,
-    /// Forcefully selects a Discrete GPU. Fails if none are found.
+
+    /// Strictly requires a dedicated/discrete GPU (e.g., an external PCIe graphics card).
+    ///
+    /// Fails with [`GpuError::HardwareNotSupported`] if only integrated graphics are available.
     Discrete,
-    /// Forcefully selects an Integrated GPU. Good for power saving.
+
+    /// Strictly requires an integrated GPU (e.g., on-CPU graphics or an APU).
+    ///
+    /// Handy for power saving or testing unified memory behavior. Fails if none is found.
     Integrated,
-    /// Selects a specific device matching the exact vendor ID (e.g., `0x10DE` for NVIDIA).
+
+    /// Matches a GPU by its PCI Vendor ID (e.g., `0x10DE` for NVIDIA, `0x1002` for AMD, `0x8086` for Intel).
+    ///
+    /// Fails with [`GpuError::HardwareNotSupported`] if no device from that vendor is present.
     VendorId(u32),
 }
 
@@ -22,12 +37,15 @@ pub(crate) struct VulkanCore {
     pub(crate) logical_device: LogicalDevice,
 
     pub(crate) physical_device_props: vk::PhysicalDeviceProperties,
+    pub(crate) max_descriptors: u32,
 
     pub(crate) compute_queue: Arc<Mutex<vk::Queue>>,
     pub(crate) compute_queue_family_index: u32,
 
     pub(crate) _transfer_queue: Arc<Mutex<vk::Queue>>,
     pub(crate) transfer_queue_family_index: u32,
+
+    pub(crate) push_descriptor: ash::khr::push_descriptor::Device,
 
     pub(crate) _debug_context: DebugContext,
 }
@@ -70,16 +88,29 @@ impl VulkanCore {
             Arc::new(Mutex::new(transfer_queue_handle))
         };
 
+        let push_descriptor = ash::khr::push_descriptor::Device::new(&instance, &logical_device);
+
+        let mut push_desc_props = vk::PhysicalDevicePushDescriptorPropertiesKHR::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut push_desc_props);
+
+        unsafe {
+            instance.get_physical_device_properties2(physical_device, &mut props2);
+        }
+
+        let max_descriptors = push_desc_props.max_push_descriptors;
+
         Ok(Self {
             _entry: entry,
             instance,
             physical_device,
             logical_device,
             physical_device_props,
+            max_descriptors,
             compute_queue,
             compute_queue_family_index,
             _transfer_queue,
             transfer_queue_family_index,
+            push_descriptor,
             _debug_context: debug_context,
         })
     }
@@ -264,7 +295,10 @@ impl VulkanCore {
             );
         }
 
-        // Feature Flags - for BDA
+        // Feature Flags - for BDA + Push Descriptor
+
+        let device_extensions = [ash::khr::push_descriptor::NAME.as_ptr()];
+
         let features = vk::PhysicalDeviceFeatures::default().shader_int64(true);
 
         let mut features_12 = vk::PhysicalDeviceVulkan12Features::default()
@@ -279,6 +313,7 @@ impl VulkanCore {
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
+            .enabled_extension_names(&device_extensions)
             .enabled_features(&features)
             .push_next(&mut features_12)
             .push_next(&mut features_13);

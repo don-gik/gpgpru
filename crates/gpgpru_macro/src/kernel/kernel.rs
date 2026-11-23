@@ -1,374 +1,607 @@
 use super::*;
 
-use syn::visit_mut::VisitMut;
+// use std::collections::HashMap;
+// use syn::spanned::Spanned;
 
-struct LifetimeChanger {
-    lifetime: syn::Lifetime,
+// ─── Shared state ──────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub enum ArgKind<'a> {
+    PushConstant { member: &'a CachedMember },
+    Descriptor { res: &'a CachedResource },
 }
 
-impl VisitMut for LifetimeChanger {
-    fn visit_type_reference_mut(&mut self, i: &mut syn::TypeReference) {
-        syn::visit_mut::visit_type_reference_mut(self, i);
+#[derive(Debug)]
+struct ArgData {
+    ident: syn::Ident,
+    ty: syn::Type,
+    is_raw: bool,
+}
 
-        if i.mutability.is_some() {
-            i.lifetime = Some(self.lifetime.clone());
+#[derive(Debug)]
+struct MatchArg<'a> {
+    ident: syn::Ident,
+    ty: syn::Type,
+    is_raw: bool,
+    kind: ArgKind<'a>,
+}
+
+#[derive(Debug, Default)]
+struct SharedState {
+    arg_data: Vec<ArgData>,
+    error: Option<syn::Error>,
+}
+
+impl SharedState {
+    pub fn push_error(&mut self, err: syn::Error) {
+        match &mut self.error {
+            Some(existing) => existing.combine(err),
+            None => self.error = Some(err),
+        }
+    }
+
+    pub fn error_spanned<T: quote::ToTokens>(&mut self, tokens: T, msg: &str) {
+        self.push_error(syn::Error::new_spanned(tokens, msg));
+    }
+
+    pub fn check_errors(&mut self) -> syn::Result<()> {
+        match self.error.take() {
+            Some(err) => Err(err),
+            None => Ok(()),
         }
     }
 }
 
-fn apply_lifetime_to_mut_refs(ty: &syn::Type, lifetime_str: &str) -> syn::Type {
-    let mut cloned_ty = ty.clone();
-    let mut changer = LifetimeChanger {
-        lifetime: syn::parse_str(lifetime_str).unwrap(),
-    };
-    changer.visit_type_mut(&mut cloned_ty);
-    cloned_ty
+#[derive(Default)]
+struct CodeGen {
+    raw_arg_tys: Vec<syn::Type>,
+    fn_args: Vec<TokenStream2>,
+    pc_copies: Vec<TokenStream2>,
+    desc_inits: Vec<TokenStream2>,
+    vk_types: Vec<TokenStream2>,
+    extra_fields: Vec<TokenStream2>,
+    extra_inits: Vec<TokenStream2>,
+    hazards: Vec<TokenStream2>,
+    asserts: Vec<TokenStream2>,
+    err: Option<syn::Error>,
 }
 
-fn parse_raw_attr(attrs: &[syn::Attribute]) -> syn::Result<bool> {
-    let mut is_raw = false;
-
-    for attr in attrs {
-        let path = attr.path();
-        let matched = path.is_ident("raw")
-            || (path.segments.len() == 2
-                && path.segments[0].ident == "gpgpru"
-                && path.segments[1].ident == "raw");
-
-        if !matched {
-            continue;
+impl CodeGen {
+    pub fn push_error(&mut self, err: syn::Error) {
+        match &mut self.err {
+            Some(existing) => existing.combine(err),
+            None => self.err = Some(err),
         }
-
-        // #[raw]
-        if !matches!(attr.meta, syn::Meta::Path(_)) {
-            return Err(syn::Error::new_spanned(
-                attr,
-                "`#[raw]` does not accept any arguments.",
-            ));
-        }
-
-        is_raw = true;
     }
 
-    Ok(is_raw)
+    pub fn finish(&mut self) -> syn::Result<()> {
+        match self.err.take() {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
 }
 
-fn format_slang_warnings(raw_warning: &str) -> String {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    let prefix_with_slash = if manifest_dir.is_empty() {
-        String::new()
-    } else {
-        format!("{}/", manifest_dir.trim_end_matches('/'))
-    };
-
-    raw_warning
-        .trim()
-        .lines()
-        .map(|line| {
-            let cleaned = if !prefix_with_slash.is_empty() {
-                line.replace(&prefix_with_slash, "")
-            } else {
-                line.to_string()
-            };
-
-            let trimmed = cleaned.trim_start();
-            if trimmed.starts_with("warning[") || trimmed.starts_with("warning:") {
-                let indent = &cleaned[..cleaned.len() - trimmed.len()];
-                format!("{indent}\x1b[1;33m{trimmed}\x1b[0m")
-            } else if trimmed.starts_with("note[") || trimmed.starts_with("note:") {
-                let indent = &cleaned[..cleaned.len() - trimmed.len()];
-                format!("{indent}\x1b[1;36m{trimmed}\x1b[0m")
-            } else {
-                cleaned
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+// ─── Top-level ─────────────────────────────────────────────────────────
 
 pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenStream2> {
-    let args: KernelArgs = syn::parse2(attr)?;
-    let slang_path_str = args.slang_path.value();
-    let entry_point_lit = args
-        .entry_point
-        .unwrap_or_else(|| syn::LitStr::new("main", args.slang_path.span()));
-    let high_precision = args.high_precision;
-
-    let mut combined_err: Option<syn::Error> = None;
-    let mut push_err = |err: syn::Error| match &mut combined_err {
-        Some(existing) => existing.combine(err),
-        None => combined_err = Some(err),
-    };
-
+    let kernel_args: KernelArgs = syn::parse2(attr)?;
     let input_fn: syn::ItemFn = syn::parse2(body)?;
-    let kernel_is_raw = parse_raw_attr(&input_fn.attrs)?;
-    let fn_name = &input_fn.sig.ident;
-    let fn_vis = &input_fn.vis;
+    let mut state = SharedState::default();
 
-    // ----------------------------------------------------------------------------------
-    // 1. Slang Compile + Reflection
-    // ----------------------------------------------------------------------------------
-    let entry_point = entry_point_lit.value();
-
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-    let absolute_slang_path = Utf8PathBuf::from(manifest_dir).join(&slang_path_str);
-
-    if !absolute_slang_path.exists() {
-        return Err(syn::Error::new(
-            args.slang_path.span(),
-            format!(
-                "Shader file not found at '{}'. (Check relative path from crate root)",
-                absolute_slang_path
-            ),
-        ));
-    }
-
-    let reflection = match ShaderCache::get_or_compile(
-        &fn_name.to_string(),
-        &absolute_slang_path,
-        &entry_point,
-        &args.profiles,
-        high_precision,
-    ) {
-        Ok(refl) => refl,
-        Err(err) => {
-            push_err(syn::Error::new(args.slang_path.span(), err));
-            return Err(combined_err.unwrap());
-        }
-    };
-
+    // 1. Compiling
+    let reflection = compile_shader(&kernel_args, &input_fn)?;
     if let Some(w) = &reflection.warnings {
         if !w.trim().is_empty() {
             eprintln!("{}\n", format_slang_warnings(w));
         }
     }
 
-    let pc_resource = reflection.push_constant();
-    let total_size = pc_resource.map(|r| r.total_size as usize).unwrap_or(0);
-    let spirv_words = &reflection.spirv_bytes;
+    // 2. Parsing
+    parse_args(&input_fn, &mut state);
 
-    // ----------------------------------------------------------------------------------
-    // 2. Collect Members & Find offsets
-    // ----------------------------------------------------------------------------------
-    let mut fn_args = Vec::new();
-    let mut param_copies = Vec::new();
-    let mut hazard_traces = Vec::new();
-    let mut const_asserts = Vec::new();
-    let mut raw_arg_tys = Vec::new();
+    let (matched, errors) = match_args(&reflection, &state.arg_data);
+    for e in errors {
+        state.push_error(e);
+    }
+    state.check_errors()?;
 
-    let mut params_fields = Vec::new();
-    let mut params_inits = Vec::new();
-    let mut bda_count = 0usize;
+    // 3. Code gen starts here
+    let mut code = CodeGen::default();
+    generate_code(&matched, &reflection, &mut code);
+    code.finish()?;
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+    let root_path = Utf8PathBuf::from(manifest_dir)
+        .join(&kernel_args.slang_path.value())
+        .into_string();
+
+    Ok(emit_final(&input_fn, &reflection, &code, &root_path))
+}
+
+// ─── Parsing Args ──────────────────────────────────────────────────────
+
+fn parse_args(input_fn: &syn::ItemFn, state: &mut SharedState) {
+    fn has_raw_attr(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| attr.path().is_ident("raw"))
+    }
+
+    let fn_is_raw = has_raw_attr(&input_fn.attrs);
+    let arg_count = input_fn.sig.inputs.len();
+
+    let mut arg_data = Vec::with_capacity(arg_count);
 
     for arg in &input_fn.sig.inputs {
-        let syn::FnArg::Typed(pat_type) = arg else {
-            continue;
-        };
-        let syn::Pat::Ident(pat_ident) = &*pat_type.pat else {
-            continue;
-        };
-
-        let arg_name = &pat_ident.ident;
-        let arg_ty = &pat_type.ty;
-        let arg_str = arg_name.to_string();
-
-        raw_arg_tys.push(arg_ty);
-
-        // Search for that member in slang reflection
-        let Some((member_idx, member)) = reflection.find_member(&arg_str) else {
-            push_err(syn::Error::new(
-                arg_name.span(),
-                format!("Cannot find field '{arg_str}' in slang shader."),
-            ));
-            continue;
-        };
-
-        let offset = member.offset as usize;
-        let slang_size = member.size as usize;
-
-        let is_raw = kernel_is_raw || parse_raw_attr(&pat_type.attrs)?;
-
-        match member.kind {
-            // --------------------------------------------------------------------------
-            // A. BDA Pointer (&impl AsGpuBuffer<T> / &mut impl AsGpuBuffer<T> / #[raw] u64)
-            // --------------------------------------------------------------------------
-            raw::MemberKind::Pointer => {
-                const_asserts.push(quote::quote! {
-                    assert!(
-                        8 == #slang_size,
-                        concat!("Size of a BDA pointer '", #arg_str, "' must be 8 bytes.")
-                    );
-                });
-
-                let end = offset + 8;
-
-                let is_raw_u64 = is_raw
-                    && matches!(
-                        &**arg_ty,
-                        syn::Type::Path(p) if p.path.is_ident("u64")
-                    );
-
-                if is_raw_u64 {
-                    fn_args.push(quote::quote! { #arg_name: u64 });
-
-                    param_copies.push(quote::quote! {
-                        ___push_constant_bytes[#offset..#end].copy_from_slice(&#arg_name.to_ne_bytes());
-                    });
-                } else {
-                    let syn::Type::Reference(type_ref) = &**arg_ty else {
-                        push_err(syn::Error::new_spanned(
-                            arg_ty,
-                            format!("BDA argument '{arg_str}' must be a reference (& or &mut)."),
-                        ));
-                        continue;
-                    };
-
-                    let is_mut = type_ref.mutability.is_some();
-
-                    let bda_size_field = quote::format_ident!("bda_size_{}", bda_count);
-                    bda_count += 1;
-
-                    let transformed_arg_ty = apply_lifetime_to_mut_refs(arg_ty, "'a");
-
-                    fn_args.push(quote::quote! {
-                        #arg_name: #transformed_arg_ty
-                    });
-
-                    params_fields.push(quote::quote! { #bda_size_field: u64 });
-                    params_inits.push(quote::quote! { #bda_size_field: #arg_name.size() });
-
-                    // not #[raw]
-                    if !is_raw {
-                        let inner_ty = extract_bda_element_type(arg_ty)?;
-
-                        for child in reflection.child_members(member_idx as i32) {
-                            let child_ident = quote::format_ident!("{}", child.name);
-                            let expected_offset = child.offset as usize;
-
-                            const_asserts.push(quote::quote! {
-                                assert!(
-                                    ::core::mem::offset_of!(#inner_ty, #child_ident) == #expected_offset,
-                                    concat!(
-                                        "Field '", stringify!(#child_ident),
-                                        "' of BDA Struct '", stringify!(#inner_ty),
-                                        "' has different offset with slang shader (", #expected_offset, "B)."
-                                    )
-                                );
-                            });
-                        }
-                    }
-
-                    param_copies.push(quote::quote! {
-                        let bda_val = #arg_name.bda();
-                        ___push_constant_bytes[#offset..#end].copy_from_slice(&bda_val.to_ne_bytes());
-                    });
-
-                    let access = if is_mut {
-                        quote::quote! { gpgpru::__private::AccessType::Write }
-                    } else {
-                        quote::quote! { gpgpru::__private::AccessType::Read }
-                    };
-
-                    hazard_traces.push(quote::quote! {
-                        let bda = u64::from_ne_bytes(self.raw[#offset..#end].try_into().unwrap());
-                        visitor(bda, self.#bda_size_field, #access);
-                    });
-                }
-            }
-
-            // --------------------------------------------------------------------------
-            // B. User-defined Struct & C. Primitive Scalar / Matrix
-            // --------------------------------------------------------------------------
-            raw::MemberKind::Struct | raw::MemberKind::Primitive => {
-                fn_args.push(quote::quote! { #arg_name: #arg_ty });
-
-                if !is_raw {
-                    if matches!(member.kind, raw::MemberKind::Primitive) {
-                        verify_primitive_or_math_type(arg_ty, member, arg_name.span())?;
-                    }
-
-                    const_asserts.push(quote::quote! {
-                        assert!(
-                            ::core::mem::size_of::<#arg_ty>() == #slang_size,
-                            concat!(
-                                "Type '", stringify!(#arg_ty),
-                                "' size mismatch with Slang shader (expected ", #slang_size, "B)."
-                            )
+        match arg {
+            syn::FnArg::Typed(pat_type) => {
+                let ident = match &*pat_type.pat {
+                    syn::Pat::Ident(ident) => ident.ident.clone(),
+                    _ => {
+                        state.error_spanned(
+                            pat_type,
+                            "kernel parameter is expected to be simple variable names.",
                         );
-                    });
-
-                    if matches!(member.kind, raw::MemberKind::Struct) {
-                        for child in reflection.child_members(member_idx as i32) {
-                            let child_ident = quote::format_ident!("{}", child.name);
-                            let expected_offset = child.offset as usize;
-
-                            const_asserts.push(quote::quote! {
-                                assert!(
-                                    ::core::mem::offset_of!(#arg_ty, #child_ident) == #expected_offset,
-                                    concat!(
-                                        "Field '", stringify!(#child_ident),
-                                        "' of Struct '", stringify!(#arg_ty),
-                                        "' has different offset with slang shader (", #expected_offset, "B)."
-                                    )
-                                );
-                            });
-                        }
+                        continue;
                     }
+                };
+                let ty = &*pat_type.ty;
 
-                    // Normal: bytemuck Zero-Copy
-                    param_copies.push(quote::quote! {
-                        let bytes = gpgpru::__private::bytemuck::bytes_of(&#arg_name);
-                        let end = #offset + bytes.len();
-                        ___push_constant_bytes[#offset..end].copy_from_slice(bytes);
-                    });
-                } else {
-                    // #[raw]: Raw byte copy
-                    param_copies.push(quote::quote! {
-                        let raw_bytes = unsafe {
-                            ::core::slice::from_raw_parts(
-                                (&#arg_name as *const _).cast::<u8>(),
-                                ::core::mem::size_of_val(&#arg_name),
-                            )
-                        };
-                        let copy_len = raw_bytes.len().min(#slang_size);
-                        let end = #offset + copy_len;
-                        ___push_constant_bytes[#offset..end].copy_from_slice(&raw_bytes[..copy_len]);
-                    });
-                }
+                arg_data.push(ArgData {
+                    ident,
+                    ty: ty.clone(),
+                    is_raw: fn_is_raw || has_raw_attr(&pat_type.attrs),
+                });
+            }
+            syn::FnArg::Receiver(receiver) => {
+                state.error_spanned(
+                    receiver,
+                    "`self` parameter is not allowed in kernel functions",
+                );
             }
         }
     }
 
-    if let Some(err) = combined_err {
-        return Err(err);
+    state.arg_data = arg_data;
+}
+
+fn match_args<'a>(
+    reflection: &'a ShaderReflection,
+    arg_data: &[ArgData],
+) -> (Vec<MatchArg<'a>>, Vec<syn::Error>) {
+    let mut out = Vec::with_capacity(arg_data.len());
+    let mut errors = Vec::new();
+
+    for arg in arg_data {
+        match reflection.find_parameter(&arg.ident.to_string(), arg.ident.span()) {
+            Ok(Some(kind)) => out.push(MatchArg {
+                ident: arg.ident.clone(),
+                ty: arg.ty.clone(),
+                is_raw: arg.is_raw,
+                kind,
+            }),
+            Ok(None) => {
+                errors.push(syn::Error::new_spanned(
+                    &arg.ident,
+                    &format!("'{}' not found in shader", arg.ident),
+                ));
+            }
+            Err(e) => errors.push(e),
+        }
     }
 
-    // ----------------------------------------------------------------------------------
-    // 3. Final AST Code Generation
-    // ----------------------------------------------------------------------------------
-    let root_include_path = absolute_slang_path.as_str();
+    (out, errors)
+}
 
-    let dep_includes = reflection
+// ─── Compiling Shader ──────────────────────────────────────────────────────
+
+fn compile_shader(
+    kernel_args: &KernelArgs,
+    input_fn: &syn::ItemFn,
+) -> syn::Result<ShaderReflection> {
+    fn get_absolute_path(s: &syn::LitStr) -> Utf8PathBuf {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+        Utf8PathBuf::from(manifest_dir).join(&s.value())
+    }
+
+    let kernel_name = &input_fn.sig.ident.to_string();
+    let slang_path = &get_absolute_path(&kernel_args.slang_path);
+    let entry_point = &kernel_args
+        .entry_point
+        .as_ref()
+        .map_or_else(|| "main".to_string(), |s| s.value());
+    let profiles = &kernel_args.profiles;
+    let high_precision = kernel_args.high_precision;
+    let reflection = ShaderCache::get_or_compile(
+        kernel_name,
+        slang_path,
+        entry_point,
+        profiles,
+        high_precision,
+    )
+    .map_err(|err| syn::Error::new(input_fn.sig.ident.span(), err.to_string()))?;
+
+    Ok(reflection)
+}
+
+// ─── Generating TokenStream2 ──────────────────────────────────────────────────────
+
+fn generate_code(matched: &[MatchArg<'_>], reflection: &ShaderReflection, code: &mut CodeGen) {
+    let pc = reflection
+        .resources
+        .iter()
+        .find(|r| r.kind == raw::ResourceKind::PushConstant)
+        .map(|r| r.members.as_slice())
+        .unwrap_or(&[]);
+
+    for m in matched {
+        code.raw_arg_tys.push(m.ty.clone());
+
+        match m.kind {
+            ArgKind::PushConstant { member } => match member.kind {
+                raw::MemberKind::Pointer => emit_pc_bda(code, m, member, pc),
+                raw::MemberKind::Primitive => emit_pc_primitive(code, m, member),
+                raw::MemberKind::Struct => emit_pc_struct(code, m, member, pc),
+            },
+            ArgKind::Descriptor { res } => emit_descriptor(code, m, res),
+        }
+    }
+}
+
+fn emit_pc_bda(code: &mut CodeGen, m: &MatchArg<'_>, member: &CachedMember, pc: &[CachedMember]) {
+    let ident = &m.ident;
+    let ty = &m.ty;
+    let offset = member.offset as usize;
+    let end = offset + 8;
+    // let member_size = member.size as usize;
+
+    // #[raw] u64 → raw pointer, no tree traversal, no size
+    if m.is_raw && matches!(&*ty, syn::Type::Path(p) if p.path.is_ident("u64")) {
+        code.push_error(syn::Error::new_spanned(
+            ty,
+            format!(
+                "'{}' is marked #[raw] as a bare `u64`, but #[raw] only relaxes the \
+                     layout check on the element type of &GpuSlice<T>. Pass the buffer itself.",
+                ident
+            ),
+        ));
+        return;
+    }
+
+    // &/&mut impl AsGpuBuffer<T> → BDA + not is_raw - tree traversal
+    let syn::Type::Reference(tref) = &*ty else {
+        code.push_error(syn::Error::new_spanned(
+            ty,
+            format!("BDA argument '{}' must be a reference (& or &mut).", ident),
+        ));
+        return;
+    };
+    let is_mut = tref.mutability.is_some();
+
+    let transformed = apply_lifetime_to_mut_refs((*ty).clone(), "'a");
+    let bda_field = quote::format_ident!("bda_{}", ident);
+    let sz_field = quote::format_ident!("sz_{}", ident);
+
+    code.fn_args.push(quote::quote! { #ident: #transformed });
+    code.extra_fields
+        .push(quote::quote! { #bda_field: u64, #sz_field: u64 });
+    code.extra_inits
+        .push(quote::quote! { #bda_field: #ident.bda(), #sz_field: #ident.size() });
+
+    if !m.is_raw {
+        let inner = extract_bda_element_type(ty).map_err(|e| {
+            code.push_error(syn::Error::new_spanned(
+                ty,
+                format!("BDA '{}': cannot infer element type.", ident),
+            ));
+            e
+        });
+        if let Ok(inner) = inner {
+            if member.scalar_type != raw::ScalarKind::None {
+                if let Err(e) = verify_primitive_or_math_type(&inner, member, ident.span()) {
+                    code.push_error(e);
+                }
+            }
+            let idx = root_idx_of(pc, &member.name);
+            emit_struct_layout(pc, idx, &inner, member.size as usize, ident.span(), code);
+        }
+    }
+
+    code.pc_copies.push(quote::quote! {
+        let bda = #ident.bda();
+        ___pc[#offset..#end].copy_from_slice(&bda.to_ne_bytes());
+    });
+
+    let access = if is_mut {
+        quote::quote! { gpgpru::__private::AccessType::Write }
+    } else {
+        quote::quote! { gpgpru::__private::AccessType::Read }
+    };
+    code.hazards.push(quote::quote! {
+        visitor(self.#bda_field, self.#sz_field, #access);
+    });
+}
+
+fn emit_pc_primitive(code: &mut CodeGen, m: &MatchArg<'_>, member: &CachedMember) {
+    let ident = &m.ident;
+    let ty = &m.ty;
+    let offset = member.offset as usize;
+    let member_size = member.size as usize;
+
+    code.fn_args.push(quote::quote! { #ident: #ty });
+
+    if m.is_raw {
+        code.pc_copies.push(quote::quote! {
+            let raw = unsafe {
+                ::core::slice::from_raw_parts(
+                    (&#ident as *const #ty).cast::<u8>(),
+                    ::core::mem::size_of_val(&#ident),
+                )
+            };
+            let len = raw.len().min(#member_size as usize);
+            ___pc[#offset..#offset + len].copy_from_slice(&raw[..len]);
+        });
+        return;
+    }
+
+    if let Err(e) = verify_primitive_or_math_type(ty, member, ident.span()) {
+        code.push_error(e);
+    }
+
+    code.asserts.push(quote::quote_spanned! { ident.span() =>
+        assert!(
+            ::core::mem::size_of::<#ty>() == #member_size,
+            concat!("'", stringify!(#ty), "' size mismatch (expected ", #member_size, "B).")
+        );
+    });
+
+    code.pc_copies.push(quote::quote! {
+        let bytes = gpgpru::__private::bytemuck::bytes_of(&#ident);
+        ___pc[#offset..#offset + bytes.len()].copy_from_slice(bytes);
+    });
+}
+
+fn emit_pc_struct(
+    code: &mut CodeGen,
+    m: &MatchArg<'_>,
+    member: &CachedMember,
+    pc: &[CachedMember],
+) {
+    let ident = &m.ident;
+    let ty = &m.ty;
+    let offset = member.offset as usize;
+    let member_size = member.size as usize;
+
+    code.fn_args.push(quote::quote! { #ident: #ty });
+
+    if m.is_raw {
+        code.pc_copies.push(quote::quote! {
+            let raw = unsafe {
+                ::core::slice::from_raw_parts(
+                    (&#ident as *const _).cast::<u8>(),
+                    ::core::mem::size_of_val(&#ident),
+                )
+            };
+            let len = raw.len().min(#member_size as usize);
+            ___pc[#offset..#offset + len].copy_from_slice(&raw[..len]);
+        });
+        return;
+    }
+
+    code.asserts.push(quote::quote_spanned! { ident.span() =>
+        assert!(
+            ::core::mem::size_of::<#ty>() == #member_size,
+            concat!("'", stringify!(#ty), "' size mismatch (expected ", #member_size, "B).")
+        );
+    });
+
+    let idx = root_idx_of(pc, &member.name);
+    emit_struct_layout(pc, idx, ty, member.size as usize, ident.span(), code);
+
+    code.pc_copies.push(quote::quote! {
+        let bytes = gpgpru::__private::bytemuck::bytes_of(&#ident);
+        ___pc[#offset..#offset + bytes.len()].copy_from_slice(bytes);
+    });
+}
+
+fn emit_descriptor(code: &mut CodeGen, m: &MatchArg<'_>, res: &CachedResource) {
+    let ident = &m.ident;
+    let set = res.set;
+    let binding = res.binding;
+
+    if set != 0 {
+        code.push_error(syn::Error::new_spanned(
+                ident,
+                format!(
+                    "descriptor resource '{}' uses descriptor set {}, but gpgpru push descriptors only support set 0. \
+                     Please change the shader binding to `[[vk::binding({}, 0)]]`.",
+                    ident, set, binding
+                ),
+            ));
+        return;
+    }
+
+    let vk_type = match res.kind {
+        raw::ResourceKind::Uniform => {
+            quote::quote! { UNIFORM_BUFFER }
+        }
+        raw::ResourceKind::StorageBuffer | raw::ResourceKind::StorageBufferReadWrite => {
+            quote::quote! { STORAGE_BUFFER }
+        }
+        _ => {
+            code.push_error(syn::Error::new_spanned(
+                ident,
+                format!(
+                    "descriptor resource '{}' ({:?}) is not implemented yet. \
+                         Only buffer descriptors (UBO / SSBO) are supported.",
+                    ident, res.kind
+                ),
+            ));
+            return;
+        }
+    };
+    code.vk_types.push(quote::quote! {
+        gpgpru::__private::vk::DescriptorType::#vk_type
+    });
+
+    let transformed = apply_lifetime_to_mut_refs(m.ty.clone(), "'a");
+    code.fn_args.push(quote::quote! { #ident: #transformed });
+
+    let bda_field = quote::format_ident!("bda_{}", ident);
+    let sz_field = quote::format_ident!("sz_{}", ident);
+    code.extra_fields
+        .push(quote::quote! { #bda_field: u64, #sz_field: u64 });
+    code.extra_inits
+        .push(quote::quote! { #bda_field: #ident.bda(), #sz_field: #ident.size() });
+
+    code.desc_inits.push(quote::quote! {
+        gpgpru::__private::PushDescriptor {
+            // set: #set,
+            binding: #binding,
+            ty: gpgpru::__private::vk::DescriptorType::#vk_type,
+            payload: gpgpru::__private::DescriptorPayload::Buffer(
+                gpgpru::__private::vk::DescriptorBufferInfo {
+                    buffer: #ident.vk_buffer(),
+                    offset: #ident.offset(),
+                    range: #ident.size(),
+                }
+            ),
+        }
+    });
+
+    // Record hazards
+    let access = if res.kind == raw::ResourceKind::Uniform {
+        quote::quote! { gpgpru::__private::AccessType::Read }
+    } else {
+        quote::quote! { gpgpru::__private::AccessType::Write }
+    };
+    code.hazards.push(quote::quote! {
+        visitor(self.#bda_field, self.#sz_field, #access);
+    });
+
+    // Validate inner layout
+    if !m.is_raw {
+        if let Some(inner) = extract_bda_element_type(&m.ty).ok() {
+            let root_idx = res
+                .members
+                .iter()
+                .position(|x| x.parent_idx == -1)
+                .unwrap_or(0);
+            emit_struct_layout(
+                &res.members,
+                root_idx,
+                &inner,
+                res.total_size as usize,
+                ident.span(),
+                code,
+            );
+        }
+    }
+}
+
+// Utils for generating code.
+
+fn child_members<'a>(
+    ms: &'a [CachedMember],
+    parent: i32,
+) -> impl Iterator<Item = (usize, &'a CachedMember)> {
+    ms.iter()
+        .enumerate()
+        .filter(move |(_, m)| m.parent_idx == parent)
+}
+
+fn emit_struct_layout(
+    ms: &[CachedMember],
+    root_idx: usize,
+    ty: &syn::Type,
+    total: usize,
+    outer_span: proc_macro2::Span,
+    code: &mut CodeGen,
+) {
+    code.asserts.push(quote::quote_spanned! {
+        outer_span =>
+        assert!(
+            ::core::mem::size_of::<#ty>() == #total,
+            concat!("'", stringify!(#ty), "' total size mismatch (slang ", #total, "B).")
+        );
+    });
+    fn walk(
+        code: &mut CodeGen,
+        ms: &[CachedMember],
+        idx: usize,
+        ty: &syn::Type,
+        outer_span: proc_macro2::Span,
+    ) {
+        for (i, c) in child_members(ms, idx as i32) {
+            let f = syn::Ident::new(&c.name, proc_macro2::Span::call_site());
+            let off = c.offset as usize;
+            code.asserts.push(quote::quote_spanned! {
+                outer_span =>
+                assert!(
+                    ::core::mem::offset_of!(#ty, #f) == #off,
+                    concat!("'", stringify!(#ty), ".", stringify!(#f),
+                            "' offset mismatch (slang ", #off, "B).")
+                );
+            });
+            if child_members(ms, i as i32).next().is_some() {
+                walk(code, ms, i, ty, outer_span);
+            }
+        }
+    }
+    walk(code, ms, root_idx, ty, outer_span);
+}
+
+fn root_idx_of(ms: &[CachedMember], name: &str) -> usize {
+    ms.iter()
+        .position(|m| m.name == name && m.parent_idx == -1)
+        .unwrap_or(0)
+}
+
+// ─── Final Emitting into AST ──────────────────────────────────────────────────────
+
+fn emit_final(
+    input_fn: &syn::ItemFn,
+    reflection: &ShaderReflection,
+    code: &CodeGen,
+    root_path: &str,
+) -> TokenStream2 {
+    let fn_vis = &input_fn.vis;
+    let fn_name = &input_fn.sig.ident;
+
+    let total_pc = reflection
+        .resources
+        .iter()
+        .find(|r| r.kind == raw::ResourceKind::PushConstant)
+        .map(|r| r.total_size as usize)
+        .unwrap_or(0);
+
+    let n_desc = code.desc_inits.len();
+    let spirv = &reflection.spirv_bytes;
+
+    let dep_includes: Vec<TokenStream2> = reflection
         .dependencies
         .iter()
-        .filter(|dep_path| dep_path.as_str() != root_include_path)
-        .map(|dep_path| {
-            quote::quote! {
-                const _: &str = include_str!(#dep_path);
-            }
-        });
+        .filter(|p| p.as_str() != root_path)
+        .map(|p| quote::quote! { const _: &str = include_str!(#p); })
+        .collect();
 
-    // let profile_paths = args.profile_paths;
+    let asserts = &code.asserts;
+    let raw_arg_tys = &code.raw_arg_tys;
+    let fn_args = &code.fn_args;
+    let pc_copies = &code.pc_copies;
+    let extra_fields = &code.extra_fields;
+    let hazards = &code.hazards;
+    let vk_types = &code.vk_types;
+    let extra_inits = &code.extra_inits;
+    let desc_inits = &code.desc_inits;
 
-    Ok(quote::quote! {
-        // For telling cargo to recompile
-        const _: &str = include_str!(#root_include_path);
+    quote::quote! {
+        // cargo recompile trigger
+        const _: &str = include_str!(#root_path);
         #(#dep_includes)*
 
-        // Compile time validation
+        // compile-time validation
         const _: () = {
-            #(#const_asserts)*
-
+            #(#asserts)*
             #[allow(dead_code, unused_variables)]
             fn _use_types(#(_: #raw_arg_tys),*) {}
         };
@@ -376,37 +609,80 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
         #[allow(non_snake_case)]
         #fn_vis fn #fn_name<'a>(
             #(#fn_args),*
-        ) -> gpgpru::__private::CommandBuilder<'a, impl gpgpru::__private::HazardTrace + Copy + 'static> {
-            static SPIRV_CODE: &[u32] = &[#(#spirv_words),*];
+        ) -> gpgpru::__private::CommandBuilder<
+            'a,
+            impl gpgpru::__private::ComputeArgs
+                + 'static,
+        > {
+            static SPIRV_CODE: &[u32] = &[#(#spirv),*];
 
-            // #[allow(unused)]
-            // const _PROFILES: &[gpgpru::prelude::SlangProfile] = &[
-            //     #( #profile_paths ),*
-            // ];
-
-            let mut ___push_constant_bytes = [0u8; #total_size];
-            #(#param_copies)*
+            // push constant bytes
+            let mut ___pc = [0u8; #total_pc];
+            #(#pc_copies)*
 
             #[repr(C)]
             #[derive(Copy, Clone)]
             struct Params {
-                raw: [u8; #total_size],
-                #(#params_fields),*
+                raw: [u8; #total_pc],
+                #(#extra_fields,)*
+                descs: [gpgpru::__private::PushDescriptor; #n_desc],
             }
 
-            impl gpgpru::__private::HazardTrace for Params {
-                fn trace_hazards(&self, visitor: &mut dyn FnMut(u64, u64, gpgpru::__private::AccessType)) {
-                    #(#hazard_traces)*
+            unsafe impl gpgpru::__private::ComputeArgs for Params {
+                type PushConstants = [u8; #total_pc];
+                type Descriptors = [gpgpru::__private::PushDescriptor; #n_desc];
+
+                const DESCRIPTOR_TYPES: &'static [gpgpru::__private::vk::DescriptorType] =
+                    &[#(#vk_types),*];
+
+                fn push_constants(&self) -> Self::PushConstants { self.raw }
+                fn descriptors(&self) -> Self::Descriptors { self.descs }
+                fn trace_hazards(
+                    &self,
+                    visitor: &mut dyn FnMut(
+                        u64,
+                        u64,
+                        gpgpru::__private::AccessType,
+                    ),
+                ) {
+                    #(#hazards)*
                 }
             }
 
             gpgpru::__private::CommandBuilder::new(
                 SPIRV_CODE,
                 Params {
-                    raw: ___push_constant_bytes,
-                    #(#params_inits),*
-                }
+                    raw: ___pc,
+                    #(#extra_inits,)*
+                    descs: [#(#desc_inits),*],
+                },
             )
         }
-    })
+    }
+}
+
+// ─── Testing ──────────────────────────────────────────────────────
+
+mod test {
+    #[allow(unused)]
+    use super::*;
+
+    #[test]
+    fn test_parsing_raw() {
+        let attr = quote::quote! {"examples/clean.slang", "scale", high};
+        let body = quote::quote! {
+            #[raw]
+            fn x(i: i32) -> i32 {
+                i
+            }
+        };
+
+        let mut state = SharedState::default();
+        let input_fn: syn::ItemFn = syn::parse2(body.clone()).unwrap();
+
+        let arg_data = parse_args(&input_fn, &mut state);
+
+        dbg!(arg_data);
+        dbg!(syn::parse2::<KernelArgs>(attr.clone()).unwrap());
+    }
 }

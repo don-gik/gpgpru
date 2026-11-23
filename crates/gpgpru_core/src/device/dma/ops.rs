@@ -1,5 +1,29 @@
 use super::*;
 
+/// Copies the entire contents of `src` into `dst` on the GPU (`vkCmdCopyBuffer`).
+///
+/// Both slices must have the exact same byte size, and their lifetimes are tied to the
+/// returned [`DmaTask`] so neither buffer can vanish mid-transfer.
+///
+/// # Panics
+///
+/// Panics if `src.size() != dst.size()`.
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn main() -> gpgpru::Result<()> {
+/// use gpgpru::prelude::*;
+/// use gpgpru::{create_buffer, dma, Device};
+///
+/// let device = Device::new()?;
+/// let src = create_buffer(&vec![1.0f32, 2.0, 3.0, 4.0]).with(&device)?;
+/// let mut dst = create_buffer::<f32>(4).with(&device)?;
+///
+/// dma::copy(&src, &mut dst).with(&device)?;
+/// # Ok(())
+/// # }
+/// ```
 pub fn copy<'a, T: Copy>(
     src: &'a GpuSlice<T>,
     dst: &'a mut GpuSlice<T>,
@@ -18,7 +42,7 @@ pub fn copy<'a, T: Copy>(
             size: src.size(),
         },
         get_hazards: move |device| {
-            let current_epoch = device.pending_epoch();
+            let current_epoch = device.pending_epoch().raw();
             let task_idx = device.next_task_index();
 
             let mut hazards = HazardResult::default();
@@ -44,6 +68,29 @@ pub fn copy<'a, T: Copy>(
     }
 }
 
+/// Fills an entire [`GpuSlice`] with a repeating pattern (`vkCmdFillBuffer`).
+///
+/// Great for zeroing out buffers or setting initial sentinel values at hardware DMA speed
+/// without spinning up a compute shader. Supports `u32`, `i32`, `f32`, and smaller types.
+///
+/// # Panics
+///
+/// Panics if `dst.offset()` or `dst.size()` is not a multiple of 4 bytes (a Vulkan hardware requirement).
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn main() -> gpgpru::Result<()> {
+/// use gpgpru::{create_buffer, dma, Device};
+///
+/// let device = Device::new()?;
+/// let mut buf = create_buffer::<f32>(1024).with(&device)?;
+///
+/// // Fill the entire buffer with `42.0f32`
+/// dma::fill(&mut buf, 42.0).with(&device)?;
+/// # Ok(())
+/// # }
+/// ```
 pub fn fill<'a, T: FillPattern>(
     dst: &'a mut GpuSlice<T>,
     pattern: T,
@@ -64,7 +111,7 @@ pub fn fill<'a, T: FillPattern>(
             pattern: pattern_u32,
         },
         get_hazards: move |device| {
-            let current_epoch = device.pending_epoch();
+            let current_epoch = device.pending_epoch().raw();
             let task_idx = device.next_task_index();
 
             let mut hazards = HazardResult::default();
@@ -82,6 +129,32 @@ pub fn fill<'a, T: FillPattern>(
     }
 }
 
+/// Performs a fast, inline upload of small host data directly into `dst` via the command buffer (`vkCmdUpdateBuffer`).
+///
+/// [`write_buffer`] internally uses dma operation when possible (64KB cap),
+/// so it is preferred to use write_buffer utility instead.
+///
+/// # Panics
+///
+/// Due to strict Vulkan `vkCmdUpdateBuffer` hardware rules, this panics if:
+/// - `data` is larger than **64 KB** (65,536 bytes)
+/// - `data` exceeds `dst.size()`
+/// - `dst.offset()` or the total byte size of `data` is not a multiple of **4 bytes**
+/// - `size_of::<T>()` is not 1, 2, or a multiple of 4 bytes (checked at compile time)
+///
+/// # Examples
+///
+/// ```no_run
+/// # fn main() -> gpgpru::Result<()> {
+/// use gpgpru::{create_buffer, dma, Device};
+///
+/// let device = Device::new()?;
+/// let mut buf = create_buffer::<u32>(16).with(&device)?;
+///
+/// dma::update(&mut buf, &[10, 20, 30, 40]).with(&device)?;
+/// # Ok(())
+/// # }
+/// ```
 pub fn update<'a, T: Copy>(
     dst: &'a mut GpuSlice<T>,
     data: &[T],
@@ -121,7 +194,7 @@ pub fn update<'a, T: Copy>(
             data: SmallVec::from_slice(byte_slice),
         },
         get_hazards: move |device| {
-            let current_epoch = device.pending_epoch();
+            let current_epoch = device.pending_epoch().raw();
             let task_idx = device.next_task_index();
 
             let mut hazards = HazardResult::default();

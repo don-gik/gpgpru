@@ -1,5 +1,33 @@
 use super::*;
 
+struct LifetimeInjector {
+    lifetime: syn::Lifetime,
+}
+
+impl syn::visit_mut::VisitMut for LifetimeInjector {
+    fn visit_type_reference_mut(&mut self, i: &mut syn::TypeReference) {
+        // recursively visit the inner type
+        syn::visit_mut::visit_type_reference_mut(self, i);
+
+        // Only apply the lifetime if it is a mutable reference without an existing lifetime
+        if i.mutability.is_some() && i.lifetime.is_none() {
+            i.lifetime = Some(self.lifetime.clone());
+        }
+    }
+}
+
+pub fn apply_lifetime_to_mut_refs(ty: syn::Type, lifetime_str: &str) -> syn::Type {
+    use syn::visit_mut::VisitMut;
+
+    let lifetime: syn::Lifetime = syn::parse_str(lifetime_str).expect("Invalid lifetime string");
+    let mut ty = ty;
+    let mut injector = LifetimeInjector { lifetime };
+    injector.visit_type_mut(&mut ty);
+    ty
+}
+
+// ------------------------------------------------------------------------------------------
+
 pub(crate) fn parse_rust_math_type(ty: &syn::Type) -> Option<(raw::ScalarKind, u8, u8)> {
     match ty {
         // [T; N] Array (e.g. [f32; 3])
@@ -147,4 +175,39 @@ pub(crate) fn extract_bda_element_type(ty: &syn::Type) -> syn::Result<syn::Type>
         ty,
         "Cannot infer T from BDA Pointer (e.g. &GpuBuffer<Vertex> or &BufferSlice<Vertex>)",
     ))
+}
+
+// ------------------------------------------------------------------------------------------
+
+pub(crate) fn format_slang_warnings(raw_warning: &str) -> String {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let prefix_with_slash = if manifest_dir.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", manifest_dir.trim_end_matches('/'))
+    };
+
+    raw_warning
+        .trim()
+        .lines()
+        .map(|line| {
+            let cleaned = if !prefix_with_slash.is_empty() {
+                line.replace(&prefix_with_slash, "")
+            } else {
+                line.to_string()
+            };
+
+            let trimmed = cleaned.trim_start();
+            if trimmed.starts_with("warning[") || trimmed.starts_with("warning:") {
+                let indent = &cleaned[..cleaned.len() - trimmed.len()];
+                format!("{indent}\x1b[1;33m{trimmed}\x1b[0m")
+            } else if trimmed.starts_with("note[") || trimmed.starts_with("note:") {
+                let indent = &cleaned[..cleaned.len() - trimmed.len()];
+                format!("{indent}\x1b[1;36m{trimmed}\x1b[0m")
+            } else {
+                cleaned
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

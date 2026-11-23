@@ -1,5 +1,6 @@
 use super::*;
 
+#[derive(Debug)]
 pub struct KernelArgs {
     pub slang_path: syn::LitStr,
     pub entry_point: Option<syn::LitStr>,
@@ -116,7 +117,7 @@ impl syn::parse::Parse for KernelArgs {
                         profiles = parsed_profiles;
                         // profile_paths = parsed_paths;
                     }
-                    "high_precision" => {
+                    "high_precision" | "high" => {
                         if input.peek(syn::Token![=]) {
                             input.parse::<syn::Token![=]>()?;
                             let val: syn::LitBool = input.parse()?;
@@ -129,7 +130,7 @@ impl syn::parse::Parse for KernelArgs {
                         return Err(syn::Error::new(
                             key.span(),
                             format!(
-                                "Unknown kernel option '{}'. Expected `entry_point`, `profiles`, or `high_precision`.",
+                                "Unknown kernel option '{}'. Expected `entry_point`, `profiles`, or `high_precision` (`high`).",
                                 other
                             ),
                         ));

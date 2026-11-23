@@ -1,15 +1,16 @@
 static const uint TILE_SIZE = 16;
 static const uint3 BLOCKDIM = uint3(TILE_SIZE, TILE_SIZE, 1);
 
+[[vk::binding(0, 0)]] StructuredBuffer<float> A;
+[[vk::binding(1, 0)]] StructuredBuffer<float> B;
+[[vk::binding(2, 0)]] RWStructuredBuffer<float> C;
+
 [shader("compute")]
 [numthreads(TILE_SIZE, TILE_SIZE, 1)]
 void gemm(
     uint3 thread_idx: SV_GroupThreadID,
     uint3 block_idx: SV_GroupID,
     
-    uniform float* A,
-    uniform float* B,
-    uniform float* C,
     uniform uint M,
     uniform uint N,
     uniform uint K,

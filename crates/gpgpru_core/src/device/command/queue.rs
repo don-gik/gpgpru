@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum BatchKind {
-    Compute(u64),
+    Compute(PipelineId),
     Transfer,
     Timestamp,
 }
@@ -123,7 +123,7 @@ impl TaskQueue {
                 }
             }
 
-            let mut current_pipeline: Option<u64> = None;
+            let mut current_pipeline: Option<PipelineId> = None;
 
             // 3. Topology Sort with Pipeline Affinity Matching
             while !ready.is_empty() {
