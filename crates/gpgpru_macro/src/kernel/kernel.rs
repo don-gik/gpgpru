@@ -3,6 +3,26 @@ use super::*;
 // use std::collections::HashMap;
 // use syn::spanned::Spanned;
 
+struct KernelError {
+    err: syn::Error,
+    deps: Vec<String>,
+}
+
+impl KernelError {
+    fn with_deps(err: syn::Error, deps: Vec<String>) -> Self {
+        Self { err, deps }
+    }
+}
+
+impl From<syn::Error> for KernelError {
+    fn from(err: syn::Error) -> Self {
+        Self {
+            err,
+            deps: Vec::new(),
+        }
+    }
+}
+
 // ─── Shared state ──────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -89,8 +109,28 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
     let input_fn: syn::ItemFn = syn::parse2(body)?;
     let mut state = SharedState::default();
 
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+    let root_path = Utf8PathBuf::from(manifest_dir)
+        .join(&kernel_args.slang_path.value())
+        .into_string();
+
+    let emit_err = |err: syn::Error, deps: &[String]| -> TokenStream2 {
+        let tracked_paths = std::iter::once(root_path.as_str())
+            .chain(deps.iter().map(|s| s.as_str()))
+            .filter(|p| Utf8Path::new(p).exists());
+
+        let err_tokens = err.to_compile_error();
+        quote::quote! {
+            #( const _: &[u8] = include_bytes!(#tracked_paths); )*
+            #err_tokens
+        }
+    };
+
     // 1. Compiling
-    let reflection = compile_shader(&kernel_args, &input_fn)?;
+    let reflection = match compile_shader(&kernel_args, &input_fn) {
+        Ok(refl) => refl,
+        Err(KernelError { err, deps }) => return Ok(emit_err(err, &deps)),
+    };
     if let Some(w) = &reflection.warnings {
         if !w.trim().is_empty() {
             eprintln!("{}\n", format_slang_warnings(w));
@@ -110,11 +150,6 @@ pub fn kernel_impl(attr: TokenStream2, body: TokenStream2) -> syn::Result<TokenS
     let mut code = CodeGen::default();
     generate_code(&matched, &reflection, &mut code);
     code.finish()?;
-
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-    let root_path = Utf8PathBuf::from(manifest_dir)
-        .join(&kernel_args.slang_path.value())
-        .into_string();
 
     Ok(emit_final(&input_fn, &reflection, &code, &root_path))
 }
@@ -197,7 +232,7 @@ fn match_args<'a>(
 fn compile_shader(
     kernel_args: &KernelArgs,
     input_fn: &syn::ItemFn,
-) -> syn::Result<ShaderReflection> {
+) -> Result<ShaderReflection, KernelError> {
     fn get_absolute_path(s: &syn::LitStr) -> Utf8PathBuf {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
         Utf8PathBuf::from(manifest_dir).join(&s.value())
@@ -211,16 +246,20 @@ fn compile_shader(
         .map_or_else(|| "main".to_string(), |s| s.value());
     let profiles = &kernel_args.profiles;
     let high_precision = kernel_args.high_precision;
-    let reflection = ShaderCache::get_or_compile(
-        kernel_name,
+
+    ShaderCache::get_or_compile(
+        &kernel_name,
         slang_path,
-        entry_point,
+        &entry_point,
         profiles,
         high_precision,
     )
-    .map_err(|err| syn::Error::new(input_fn.sig.ident.span(), err.to_string()))?;
-
-    Ok(reflection)
+    .map_err(|e| {
+        KernelError::with_deps(
+            syn::Error::new(input_fn.sig.ident.span(), e.error.to_string()),
+            e.fallback_deps,
+        )
+    })
 }
 
 // ─── Generating TokenStream2 ──────────────────────────────────────────────────────
@@ -596,7 +635,7 @@ fn emit_final(
 
     quote::quote! {
         // cargo recompile trigger
-        const _: &str = include_str!(#root_path);
+        const _: &[u8] = include_bytes!(#root_path);
         #(#dep_includes)*
 
         // compile-time validation

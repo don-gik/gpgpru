@@ -5,6 +5,7 @@ version.workspace = true
 description = "Macros for gpgpru"
 license.workspace = true
 readme.workspace = true
+repository.workspace = true
 
 [lib]
 proc-macro = true

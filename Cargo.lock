@@ -94,7 +94,7 @@ checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "gpgpru"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "bytemuck",
  "gpgpru_core",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "gpgpru_core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "ash",
  "crossbeam-queue",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "gpgpru_macro"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "camino",
  "cmake",

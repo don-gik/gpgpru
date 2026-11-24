@@ -5,6 +5,7 @@ version.workspace = true
 description = "Rust GPU framework"
 license.workspace = true
 readme.workspace = true
+repository.workspace = true
 
 [dependencies]
 bytemuck.workspace = true

@@ -117,6 +117,7 @@ pub mod raw {
         _private: [u8; 0],
     }
 
+    #[cfg(not(docsrs))]
     unsafe extern "C" {
         pub fn shadertool_create_context() -> *mut Context;
         pub fn shadertool_destroy_context(ctx: *mut Context);
@@ -132,6 +133,57 @@ pub mod raw {
         ) -> CompileResult;
         pub fn shadertool_free_compile_result(result: *mut CompileResult);
     }
+
+    #[cfg(docsrs)]
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn shadertool_create_context() -> *mut Context {
+        std::ptr::null_mut()
+    }
+
+    #[cfg(docsrs)]
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn shadertool_destroy_context(_ctx: *mut Context) {}
+
+    #[cfg(docsrs)]
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn shadertool_compile_shader(
+        _ctx: *const Context,
+        _module_name: *const c_char,
+        _module_path: *const c_char,
+        _entry_point: *const c_char,
+        _profiles: *const SlangProfile,
+        _profile_count: usize,
+        _should_optimize: bool,
+        _high_prevision: bool,
+    ) -> CompileResult {
+        CompileResult {
+            success: true,
+            error_info: ErrorInfo {
+                code: ErrorCode::Ok,
+                message: std::ptr::null(),
+                file_path: std::ptr::null(),
+                line: 0,
+                column: 0,
+            },
+            optim_info: ErrorInfo {
+                code: ErrorCode::Ok,
+                message: std::ptr::null(),
+                file_path: std::ptr::null(),
+                line: 0,
+                column: 0,
+            },
+            warning_message: std::ptr::null(),
+            code_bytes: std::ptr::null(),
+            code_size: 0,
+            dep_file_path: std::ptr::null(),
+            dep_file_count: 0,
+            resources: std::ptr::null(),
+        }
+    }
+
+    #[cfg(docsrs)]
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe fn shadertool_free_compile_result(_result: *mut CompileResult) {}
 }
 
 use std::ffi::{CStr, CString};
